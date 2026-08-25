@@ -1,0 +1,56 @@
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# ==============================
+# Environment / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+# ==============================
+# Node / Next.js
+# ==============================
+node_modules/
+.next/
+
+# ==============================
+# IDE / OS
+# ==============================
+.vscode/
+.idea/
+.DS_Store
+
+# ==============================
+# RepoMind runtime data
+# ==============================
+data/
+repos/
+workspace/
+models/
+
+# ==============================
+# Database / Redis
+# ==============================
+postgres-data/
+redis-data/
+
+# ==============================
+# Logs
+# ==============================
+*.log
+logs/
+
+# ==============================
+# Local development instructions
+# ==============================
+AGENTS.md
+docs/ROADMAP.md
