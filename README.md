@@ -2,7 +2,7 @@
 
 RepoMind is a planned AI-powered codebase intelligence platform designed to help developers understand unfamiliar Git repositories through code-aware search and evidence-grounded answers.
 
-> **Project status:** Development is in progress. RepoMind is currently at the project-definition stage; the MVP capabilities described below are planned and are not yet implemented.
+> **Project status:** Development is in progress. A minimal FastAPI backend and health endpoint are available; the remaining MVP capabilities described below are planned and are not yet implemented.
 
 ## The Problem
 
@@ -131,6 +131,20 @@ The following technologies represent the planned direction for the MVP. Their pr
 
 Technologies will be introduced only when their roadmap stage requires them. The project will prefer the smallest correct implementation over premature infrastructure.
 
+## Run the Backend Locally
+
+RepoMind currently requires Python 3.12 or newer. From the repository root:
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --editable .
+uvicorn app.main:app --reload
+```
+
+The API will be available at `http://127.0.0.1:8000`. Its current health endpoint is `GET /health`.
+
 ## Safety and Trust Principles
 
 RepoMind is planned around several non-negotiable principles:
@@ -147,4 +161,4 @@ RepoMind is planned around several non-negotiable principles:
 
 ## Project Status
 
-RepoMind is under active development. The current stage defines the product charter, scope, constraints, and success criteria for v0.1.0. Application implementation will proceed incrementally in later development stages, and this README will be updated as capabilities become available and verifiable.
+RepoMind is under active development. The project charter and a minimal HTTP backend are now in place. Additional capabilities will be implemented incrementally in later development stages, and this README will be updated as they become available and verifiable.
