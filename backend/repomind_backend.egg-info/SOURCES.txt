@@ -1,8 +1,0 @@
-pyproject.toml
-app/__init__.py
-app/main.py
-repomind_backend.egg-info/PKG-INFO
-repomind_backend.egg-info/SOURCES.txt
-repomind_backend.egg-info/dependency_links.txt
-repomind_backend.egg-info/requires.txt
-repomind_backend.egg-info/top_level.txt

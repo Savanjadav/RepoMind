@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: repomind-backend
-Version: 0.1.0
-Summary: Backend API for RepoMind
-Requires-Python: >=3.12
-Requires-Dist: fastapi<1.0,>=0.115
-Requires-Dist: uvicorn<1.0,>=0.30
