@@ -3,6 +3,10 @@ from enum import StrEnum
 from typing import Protocol
 
 
+class CodeParsingError(RuntimeError):
+    """Raised when source cannot be parsed into reliable code units."""
+
+
 class CodeUnitKind(StrEnum):
     CLASS = "class"
     FUNCTION = "function"
