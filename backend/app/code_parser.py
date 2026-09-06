@@ -9,6 +9,8 @@ class CodeParsingError(RuntimeError):
 
 class CodeUnitKind(StrEnum):
     CLASS = "class"
+    CONFIG = "config"
+    DOCUMENT = "document"
     FUNCTION = "function"
     IMPORT = "import"
 

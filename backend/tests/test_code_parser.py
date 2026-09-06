@@ -86,7 +86,13 @@ def test_fake_parser_structurally_satisfies_contract() -> None:
 
 @pytest.mark.parametrize(
     "kind",
-    [CodeUnitKind.CLASS, CodeUnitKind.FUNCTION, CodeUnitKind.IMPORT],
+    [
+        CodeUnitKind.CLASS,
+        CodeUnitKind.CONFIG,
+        CodeUnitKind.DOCUMENT,
+        CodeUnitKind.FUNCTION,
+        CodeUnitKind.IMPORT,
+    ],
 )
 def test_supported_code_unit_kinds(kind: CodeUnitKind) -> None:
     assert _unit(kind=kind).kind is kind
