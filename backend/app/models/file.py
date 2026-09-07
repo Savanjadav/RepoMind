@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
+    from app.models.code_unit import CodeUnit
     from app.models.repository import Repository
 
 
@@ -31,3 +32,8 @@ class File(Base):
     )
     path: Mapped[str] = mapped_column(Text, nullable=False)
     repository: Mapped["Repository"] = relationship(back_populates="files")
+    code_units: Mapped[list["CodeUnit"]] = relationship(
+        back_populates="file",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
