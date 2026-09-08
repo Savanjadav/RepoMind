@@ -11,6 +11,7 @@ dependencies = [
     "alembic>=1.15,<2.0",
     "fastapi>=0.115,<1.0",
     "psycopg[binary]>=3.2,<4.0",
+    "sentence-transformers>=6.0.1,<7.0",
     "sqlalchemy>=2.0,<3.0",
     "tree-sitter>=0.26,<0.27",
     "tree-sitter-javascript>=0.25,<0.26",
