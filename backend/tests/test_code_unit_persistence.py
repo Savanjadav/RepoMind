@@ -355,10 +355,14 @@ def test_migration_schema_matches_model(database_session: Session) -> None:
         "start_line",
         "end_line",
         "symbol_name",
+        "embedding",
     }
     assert columns["symbol_name"]["nullable"] is True
+    assert columns["embedding"]["nullable"] is True
+    assert str(columns["embedding"]["type"]).lower() == "vector(384)"
     assert all(
-        columns[name]["nullable"] is False for name in set(columns) - {"symbol_name"}
+        columns[name]["nullable"] is False
+        for name in set(columns) - {"symbol_name", "embedding"}
     )
 
     foreign_keys = inspector.get_foreign_keys("code_units")
@@ -377,7 +381,8 @@ def test_migration_schema_matches_model(database_session: Session) -> None:
         "ck_code_units_start_line_positive",
     }
     assert {index["name"] for index in inspector.get_indexes("code_units")} == {
-        "ix_code_units_file_id"
+        "ix_code_units_embedding_hnsw",
+        "ix_code_units_file_id",
     }
 
 
