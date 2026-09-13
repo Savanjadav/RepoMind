@@ -19,6 +19,7 @@ from app.lexical_search import LexicalSearchResult, search_code_units_lexically
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.repository import Repository
+from app.retrieval_filters import RetrievalFilters
 from app.semantic_search import SemanticSearchResult, search_code_units_semantically
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -364,6 +365,7 @@ def test_equal_rrf_scores_use_only_deterministic_metadata_ties(
         repository_id: UUID,
         query_vector: Sequence[float],
         limit: int = 10,
+        filters: RetrievalFilters | None = None,
     ) -> list[SemanticSearchResult]:
         return semantic_results
 
@@ -373,6 +375,7 @@ def test_equal_rrf_scores_use_only_deterministic_metadata_ties(
         repository_id: UUID,
         query: str,
         limit: int = 10,
+        filters: RetrievalFilters | None = None,
     ) -> list[LexicalSearchResult]:
         return lexical_results
 
@@ -408,7 +411,7 @@ def test_equal_rrf_scores_use_only_deterministic_metadata_ties(
 def test_candidate_limits_are_bounded_and_both_retrievers_called_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, int, RetrievalFilters | None]] = []
 
     def fake_semantic_search(
         session: Session,
@@ -416,8 +419,9 @@ def test_candidate_limits_are_bounded_and_both_retrievers_called_once(
         repository_id: UUID,
         query_vector: Sequence[float],
         limit: int = 10,
+        filters: RetrievalFilters | None = None,
     ) -> list[SemanticSearchResult]:
-        calls.append(("semantic", limit))
+        calls.append(("semantic", limit, filters))
         return []
 
     def fake_lexical_search(
@@ -426,8 +430,9 @@ def test_candidate_limits_are_bounded_and_both_retrievers_called_once(
         repository_id: UUID,
         query: str,
         limit: int = 10,
+        filters: RetrievalFilters | None = None,
     ) -> list[LexicalSearchResult]:
-        calls.append(("lexical", limit))
+        calls.append(("lexical", limit, filters))
         return []
 
     monkeypatch.setattr(
@@ -470,18 +475,31 @@ def test_candidate_limits_are_bounded_and_both_retrievers_called_once(
         query_vector=[1.0],
         limit=100,
     )
+    filters = RetrievalFilters(path="src/auth")
+    search_code_units_hybrid(
+        session,
+        repository_id=repository_id,
+        query="query",
+        query_vector=[1.0],
+        limit=2,
+        filters=filters,
+    )
 
     assert CANDIDATE_MULTIPLIER == 3
     assert calls == [
-        ("semantic", 30),
-        ("lexical", 30),
-        ("semantic", 3),
-        ("lexical", 3),
-        ("semantic", 100),
-        ("lexical", 100),
-        ("semantic", 100),
-        ("lexical", 100),
+        ("semantic", 30, None),
+        ("lexical", 30, None),
+        ("semantic", 3, None),
+        ("lexical", 3, None),
+        ("semantic", 100, None),
+        ("lexical", 100, None),
+        ("semantic", 100, None),
+        ("lexical", 100, None),
+        ("semantic", 6, filters),
+        ("lexical", 6, filters),
     ]
+    assert calls[-2][2] is filters
+    assert calls[-1][2] is filters
 
 
 @pytest.mark.parametrize(

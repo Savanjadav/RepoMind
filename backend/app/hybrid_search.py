@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.code_parser import CodeUnitKind
 from app.lexical_search import LexicalSearchResult, search_code_units_lexically
+from app.retrieval_filters import RetrievalFilters
 from app.semantic_search import SemanticSearchResult, search_code_units_semantically
 
 RRF_K = 60
@@ -37,6 +38,7 @@ def search_code_units_hybrid(
     query: str,
     query_vector: Sequence[float],
     limit: int = 10,
+    filters: RetrievalFilters | None = None,
 ) -> list[HybridSearchResult]:
     _validate_limit(limit)
     candidate_limit = min(limit * CANDIDATE_MULTIPLIER, 100)
@@ -46,12 +48,14 @@ def search_code_units_hybrid(
         repository_id=repository_id,
         query_vector=query_vector,
         limit=candidate_limit,
+        filters=filters,
     )
     lexical_results = search_code_units_lexically(
         session,
         repository_id=repository_id,
         query=query,
         limit=candidate_limit,
+        filters=filters,
     )
 
     semantic_by_id = {

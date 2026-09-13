@@ -8,6 +8,10 @@ from app.code_parser import CodeUnitKind
 from app.models.code_unit import CodeUnit
 from app.models.file import File
 from app.models.repository import Repository
+from app.retrieval_filters import (
+    RetrievalFilters,
+    build_retrieval_filter_predicates,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,7 @@ def search_code_units_lexically(
     repository_id: UUID,
     query: str,
     limit: int = 10,
+    filters: RetrievalFilters | None = None,
 ) -> list[LexicalSearchResult]:
     _validate_query(query)
     _validate_limit(limit)
@@ -73,6 +78,7 @@ def search_code_units_lexically(
         (full_text_match, 1),
     )
     lexical_score = case(*score_conditions, else_=0).label("lexical_score")
+    filter_predicates = build_retrieval_filter_predicates(filters)
 
     statement = (
         select(
@@ -91,6 +97,7 @@ def search_code_units_lexically(
         .where(
             File.repository_id == repository_id,
             or_(*(condition for condition, _ in score_conditions)),
+            *filter_predicates,
         )
         .order_by(
             lexical_score.desc(),

@@ -11,6 +11,10 @@ from app.code_parser import CodeUnitKind
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.repository import Repository
+from app.retrieval_filters import (
+    RetrievalFilters,
+    build_retrieval_filter_predicates,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,7 @@ def search_code_units_semantically(
     repository_id: UUID,
     query_vector: Sequence[float],
     limit: int = 10,
+    filters: RetrievalFilters | None = None,
 ) -> list[SemanticSearchResult]:
     validated_query = _validate_query_vector(query_vector)
     _validate_limit(limit)
@@ -42,6 +47,7 @@ def search_code_units_semantically(
 
     zero_vector = [0.0] * EMBEDDING_DIMENSION
     cosine_distance = CodeUnit.embedding.cosine_distance(validated_query)
+    filter_predicates = build_retrieval_filter_predicates(filters)
     statement = (
         select(
             CodeUnit.id,
@@ -60,6 +66,7 @@ def search_code_units_semantically(
             File.repository_id == repository_id,
             CodeUnit.embedding.is_not(None),
             CodeUnit.embedding != zero_vector,
+            *filter_predicates,
         )
         .order_by(
             cosine_distance.asc(),
