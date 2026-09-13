@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "repository": {
+    "type": "committed_fixture",
+    "name": "atlas-service",
+    "path": "backend/tests/fixtures/retrieval_evaluation/corpus"
+  },
+  "questions": [
+    {
+      "id": "credential-verification",
+      "category": "conceptual",
+      "question": "How are submitted credentials verified before a login token is returned?",
+      "expected_targets": [
+        {
+          "path": "src/auth/service.py",
+          "symbol": "authenticate_user"
+        },
+        {
+          "path": "src/auth/service.py",
+          "symbol": "login_user"
+        }
+      ]
+    },
+    {
+      "id": "token-lifecycle",
+      "category": "conceptual",
+      "question": "How does the service create and decode access tokens?",
+      "expected_targets": [
+        {
+          "path": "src/auth/tokens.py",
+          "symbol": "create_access_token"
+        },
+        {
+          "path": "src/auth/tokens.py",
+          "symbol": "decode_access_token"
+        }
+      ]
+    },
+    {
+      "id": "job-retry",
+      "category": "conceptual",
+      "question": "What happens when a background job fails and can be retried?",
+      "expected_targets": [
+        {
+          "path": "src/workers/retry.ts",
+          "symbol": "retryFailedJob"
+        },
+        {
+          "path": "src/workers/retry.ts",
+          "symbol": "RetryPolicy"
+        }
+      ]
+    },
+    {
+      "id": "login-request-flow",
+      "category": "conceptual",
+      "question": "How does an API login request reach the authentication logic?",
+      "expected_targets": [
+        {
+          "path": "src/api/routes.py",
+          "symbol": "login_endpoint"
+        },
+        {
+          "path": "src/auth/service.py",
+          "symbol": "login_user"
+        }
+      ]
+    },
+    {
+      "id": "authenticate-user-definition",
+      "category": "exact",
+      "question": "Where is `authenticate_user` defined?",
+      "expected_targets": [
+        {
+          "path": "src/auth/service.py",
+          "symbol": "authenticate_user"
+        }
+      ]
+    },
+    {
+      "id": "access-token-definition",
+      "category": "exact",
+      "question": "Where is `create_access_token` defined?",
+      "expected_targets": [
+        {
+          "path": "src/auth/tokens.py",
+          "symbol": "create_access_token"
+        }
+      ]
+    },
+    {
+      "id": "jwt-secret-configuration",
+      "category": "exact",
+      "question": "Where is `JWT_SECRET` configured?",
+      "expected_targets": [
+        {
+          "path": "config/settings.yaml",
+          "symbol": null
+        }
+      ]
+    },
+    {
+      "id": "route-registration",
+      "category": "structural",
+      "question": "Where are the application's API routes registered?",
+      "expected_targets": [
+        {
+          "path": "src/api/routes.py",
+          "symbol": "register_routes"
+        }
+      ]
+    },
+    {
+      "id": "database-session-creation",
+      "category": "structural",
+      "question": "Which module creates database sessions?",
+      "expected_targets": [
+        {
+          "path": "src/database/session.py",
+          "symbol": "create_database_session"
+        }
+      ]
+    },
+    {
+      "id": "retry-documentation",
+      "category": "structural",
+      "question": "Where is background-job retry behavior documented?",
+      "expected_targets": [
+        {
+          "path": "README.md",
+          "symbol": "Background jobs"
+        }
+      ]
+    }
+  ]
+}
