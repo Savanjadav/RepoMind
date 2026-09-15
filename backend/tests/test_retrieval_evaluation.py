@@ -21,6 +21,7 @@ from app.retrieval_evaluation import (
     ExpectedTarget,
     QuestionMetrics,
     RankedIdentity,
+    RerankerMetadata,
     RetrievalModeMetrics,
     aggregate_question_metrics,
     evaluate_question,
@@ -175,7 +176,11 @@ def test_committed_dataset_loads_defensively() -> None:
     assert all(question.expected_targets for question in dataset.questions)
 
 
-def _sample_report() -> EvaluationReport:
+def _sample_report(
+    *,
+    controls: bool = False,
+    reranker_active: bool = True,
+) -> EvaluationReport:
     dataset = EvaluationDataset(
         version=1,
         name="atlas-service",
@@ -191,8 +196,12 @@ def _sample_report() -> EvaluationReport:
         results=(_identity("target.py", "target"),),
     )
     mode = RetrievalModeMetrics(
-        recall_at_k=dict(question.recall_at_k),
-        mrr=question.reciprocal_rank,
+        recall_at_k=(
+            {1: 0.6, 3: 0.95, 5: 1.0, 10: 1.0}
+            if controls
+            else dict(question.recall_at_k)
+        ),
+        mrr=0.8 if controls else question.reciprocal_rank,
         questions=(question,),
     )
     return EvaluationReport(
@@ -203,9 +212,16 @@ def _sample_report() -> EvaluationReport:
             dimension=EMBEDDING_DIMENSION,
             sentence_transformers_version="test-version",
         ),
+        reranker=RerankerMetadata(
+            provider="FakeReranker",
+            model="fake-reranker",
+            sentence_transformers_version="test-version",
+        ),
+        reranker_active=reranker_active,
         code_unit_count=15,
         semantic=mode,
         hybrid=mode,
+        reranked=mode,
     )
 
 
@@ -222,6 +238,15 @@ def test_report_serialization_is_deterministic_and_rounded() -> None:
         "3": 0.666667,
         "5": 1.0,
         "10": 1.0,
+    }
+    assert set(document["modes"]) == {"semantic", "hybrid", "reranked"}
+    assert document["reranker"] == {
+        "provider": "FakeReranker",
+        "model": "fake-reranker",
+        "active": True,
+        "candidate_multiplier": 2,
+        "max_candidates": 100,
+        "sentence_transformers_version": "test-version",
     }
 
 
@@ -244,13 +269,59 @@ def test_write_flag_is_the_only_cli_path_that_writes_baseline(
     baseline_path = tmp_path / "baseline.json"
     monkeypatch.setattr(evaluation_module, "BASELINE_PATH", baseline_path)
     monkeypatch.setattr(evaluation_module, "_PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(evaluation_module, "_run_real_evaluation", _sample_report)
+    monkeypatch.setattr(
+        evaluation_module,
+        "_run_real_evaluation",
+        lambda: _sample_report(controls=True),
+    )
     monkeypatch.setattr(evaluation_module, "_print_summary", lambda report: None)
 
     assert evaluation_module.main(["--write-baseline"]) == 0
     assert baseline_path.read_text(encoding="utf-8") == serialize_report(
-        _sample_report()
+        _sample_report(controls=True)
     )
+
+
+def test_unavailable_reranker_cannot_overwrite_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text("known-good\n", encoding="utf-8")
+    monkeypatch.setattr(evaluation_module, "BASELINE_PATH", baseline_path)
+
+    with pytest.raises(RuntimeError, match="fallback was used"):
+        evaluation_module._write_baseline(
+            _sample_report(controls=True, reranker_active=False)
+        )
+
+    assert baseline_path.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_changed_control_cannot_overwrite_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text("known-good\n", encoding="utf-8")
+    monkeypatch.setattr(evaluation_module, "BASELINE_PATH", baseline_path)
+
+    with pytest.raises(RuntimeError, match="semantic control changed"):
+        evaluation_module._write_baseline(_sample_report())
+
+    assert baseline_path.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_fallback_summary_does_not_report_reranked_metrics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evaluation_module._print_summary(_sample_report(reranker_active=False))
+
+    output = capsys.readouterr().out
+    assert "semantic: Recall@1=" in output
+    assert "hybrid: Recall@1=" in output
+    assert "reranked: unavailable; hybrid-order fallback used" in output
+    assert "reranked: Recall@1=" not in output
 
 
 class FakeEmbeddingProvider:
@@ -265,6 +336,20 @@ class FakeEmbeddingProvider:
         batch = tuple(texts)
         self.batches.append(batch)
         return [_vector_for_text(text) for text in batch]
+
+
+class FakeReranker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    @property
+    def model_name(self) -> str:
+        return "deterministic-test-reranker"
+
+    def score(self, query: str, documents: Sequence[str]) -> list[float]:
+        document_batch = tuple(documents)
+        self.calls.append((query, document_batch))
+        return [float(len(document_batch) - index) for index in range(len(documents))]
 
 
 def _vector_for_text(text: str) -> list[float]:
@@ -297,10 +382,16 @@ def _database_counts(database_url: str) -> tuple[int, int, int]:
 def test_real_staging_and_retrieval_are_isolated() -> None:
     assert DATABASE_URL is not None
     provider = FakeEmbeddingProvider()
+    reranker = FakeReranker()
     metadata = EmbeddingMetadata(
         provider=type(provider).__name__,
         model="deterministic-test-vectors",
         dimension=provider.dimension,
+        sentence_transformers_version="not-used",
+    )
+    reranker_metadata = RerankerMetadata(
+        provider=type(reranker).__name__,
+        model=reranker.model_name,
         sentence_transformers_version="not-used",
     )
     counts_before = _database_counts(DATABASE_URL)
@@ -313,6 +404,8 @@ def test_real_staging_and_retrieval_are_isolated() -> None:
     report = run_evaluation(
         embedding_provider=provider,
         embedding_metadata=metadata,
+        reranker=reranker,
+        reranker_metadata=reranker_metadata,
         database_url=DATABASE_URL,
     )
 
@@ -320,9 +413,17 @@ def test_real_staging_and_retrieval_are_isolated() -> None:
     assert len(report.dataset.questions) == 10
     assert len(report.semantic.questions) == 10
     assert len(report.hybrid.questions) == 10
+    assert len(report.reranked.questions) == 10
+    assert report.reranker_active is True
     assert set(K_VALUES) == set(report.semantic.recall_at_k)
     assert set(K_VALUES) == set(report.hybrid.recall_at_k)
+    assert set(K_VALUES) == set(report.reranked.recall_at_k)
     assert [len(batch) for batch in provider.batches] == [15, 10]
+    assert [query for query, _ in reranker.calls] == [
+        question.question for question in report.dataset.questions
+    ]
+    assert len(reranker.calls) == 10
+    assert all(documents for _, documents in reranker.calls)
     assert _database_counts(DATABASE_URL) == counts_before
     baseline_after = (
         evaluation_module.BASELINE_PATH.read_bytes()

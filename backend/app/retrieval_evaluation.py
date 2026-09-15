@@ -10,6 +10,9 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.cross_encoder_reranking_provider import (
+    CrossEncoderRerankingProvider,
+)
 from app.database import create_database_engine
 from app.embedding_provider import EmbeddingProvider
 from app.hybrid_search import (
@@ -22,6 +25,12 @@ from app.models.file import File
 from app.models.repository import Repository
 from app.repository_clone import ClonedRepository
 from app.repository_indexing import _index_cloned_repository
+from app.reranked_search import (
+    MAX_RERANK_CANDIDATES,
+    RERANK_CANDIDATE_MULTIPLIER,
+    search_code_units_reranked,
+)
+from app.reranking_provider import RerankingProvider
 from app.semantic_search import search_code_units_semantically
 from app.sentence_transformer_embedding_provider import (
     DEFAULT_MODEL_NAME,
@@ -42,6 +51,8 @@ _EXPECTED_CORPUS_PATH = "backend/tests/fixtures/retrieval_evaluation/corpus"
 _EXPECTED_QUESTION_COUNT = 10
 _DATASET_VERSION = 1
 _REPORT_VERSION = 1
+_EXPECTED_CONTROL_RECALL = {1: 0.6, 3: 0.95, 5: 1.0, 10: 1.0}
+_EXPECTED_CONTROL_MRR = 0.8
 
 
 class ResultIdentity(Protocol):
@@ -106,12 +117,22 @@ class EmbeddingMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class RerankerMetadata:
+    provider: str
+    model: str
+    sentence_transformers_version: str
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReport:
     dataset: EvaluationDataset
     embedding: EmbeddingMetadata
+    reranker: RerankerMetadata
+    reranker_active: bool
     code_unit_count: int
     semantic: RetrievalModeMetrics
     hybrid: RetrievalModeMetrics
+    reranked: RetrievalModeMetrics
 
 
 def target_matches_result(
@@ -234,6 +255,8 @@ def evaluate_retrieval(
     dataset: EvaluationDataset,
     embedding_provider: EmbeddingProvider,
     embedding_metadata: EmbeddingMetadata,
+    reranker: RerankingProvider,
+    reranker_metadata: RerankerMetadata,
 ) -> EvaluationReport:
     if embedding_provider.dimension != EMBEDDING_DIMENSION:
         raise RuntimeError("Embedding provider dimension does not match storage")
@@ -284,6 +307,8 @@ def evaluate_retrieval(
 
     semantic_questions: list[QuestionMetrics] = []
     hybrid_questions: list[QuestionMetrics] = []
+    reranked_questions: list[QuestionMetrics] = []
+    reranker_active = True
     for question, query_vector in zip(
         dataset.questions,
         query_vectors,
@@ -330,12 +355,41 @@ def evaluate_retrieval(
             )
         )
 
+        reranked_results = search_code_units_reranked(
+            session,
+            repository_id=repository.id,
+            query=question.question,
+            query_vector=query_vector,
+            reranker=reranker,
+            limit=RESULT_LIMIT,
+            filters=None,
+        )
+        if not reranked_results or any(
+            result.rerank_score is None for result in reranked_results
+        ):
+            reranker_active = False
+        reranked_questions.append(
+            evaluate_question(
+                question,
+                [
+                    RankedIdentity(
+                        path=result.path,
+                        symbol_name=result.symbol_name,
+                    )
+                    for result in reranked_results
+                ],
+            )
+        )
+
     return EvaluationReport(
         dataset=dataset,
         embedding=embedding_metadata,
+        reranker=reranker_metadata,
+        reranker_active=reranker_active,
         code_unit_count=code_unit_count,
         semantic=aggregate_question_metrics(semantic_questions),
         hybrid=aggregate_question_metrics(hybrid_questions),
+        reranked=aggregate_question_metrics(reranked_questions),
     )
 
 
@@ -343,6 +397,8 @@ def run_evaluation(
     *,
     embedding_provider: EmbeddingProvider,
     embedding_metadata: EmbeddingMetadata,
+    reranker: RerankingProvider,
+    reranker_metadata: RerankerMetadata,
     database_url: str | None = None,
     dataset_path: Path = EVALUATION_DATASET_PATH,
 ) -> EvaluationReport:
@@ -358,6 +414,8 @@ def run_evaluation(
                         dataset=dataset,
                         embedding_provider=embedding_provider,
                         embedding_metadata=embedding_metadata,
+                        reranker=reranker,
+                        reranker_metadata=reranker_metadata,
                     )
             finally:
                 transaction.rollback()
@@ -384,6 +442,16 @@ def serialize_report(report: EvaluationReport) -> str:
                 report.embedding.sentence_transformers_version
             ),
         },
+        "reranker": {
+            "provider": report.reranker.provider,
+            "model": report.reranker.model,
+            "active": report.reranker_active,
+            "candidate_multiplier": RERANK_CANDIDATE_MULTIPLIER,
+            "max_candidates": MAX_RERANK_CANDIDATES,
+            "sentence_transformers_version": (
+                report.reranker.sentence_transformers_version
+            ),
+        },
         "evaluation": {
             "k_values": list(K_VALUES),
             "result_limit": RESULT_LIMIT,
@@ -396,6 +464,7 @@ def serialize_report(report: EvaluationReport) -> str:
         "modes": {
             "semantic": _serialize_mode(report.semantic),
             "hybrid": _serialize_mode(report.hybrid),
+            "reranked": _serialize_mode(report.reranked),
         },
     }
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
@@ -502,14 +571,22 @@ def _real_embedding_metadata() -> EmbeddingMetadata:
 
 
 def _run_real_evaluation() -> EvaluationReport:
-    provider = SentenceTransformerEmbeddingProvider()
+    embedding_provider = SentenceTransformerEmbeddingProvider()
+    reranker = CrossEncoderRerankingProvider()
     return run_evaluation(
-        embedding_provider=provider,
+        embedding_provider=embedding_provider,
         embedding_metadata=_real_embedding_metadata(),
+        reranker=reranker,
+        reranker_metadata=RerankerMetadata(
+            provider=type(reranker).__name__,
+            model=reranker.model_name,
+            sentence_transformers_version=package_version("sentence-transformers"),
+        ),
     )
 
 
 def _write_baseline(report: EvaluationReport) -> None:
+    _validate_baseline_report(report)
     BASELINE_PATH.write_text(serialize_report(report), encoding="utf-8")
 
 
@@ -517,6 +594,24 @@ def _print_summary(report: EvaluationReport) -> None:
     for name, mode in (("semantic", report.semantic), ("hybrid", report.hybrid)):
         recall = " ".join(f"Recall@{k}={mode.recall_at_k[k]:.6f}" for k in K_VALUES)
         print(f"{name}: {recall} MRR={mode.mrr:.6f}")
+    if report.reranker_active:
+        recall = " ".join(
+            f"Recall@{k}={report.reranked.recall_at_k[k]:.6f}" for k in K_VALUES
+        )
+        print(f"reranked: {recall} MRR={report.reranked.mrr:.6f}")
+    else:
+        print("reranked: unavailable; hybrid-order fallback used")
+
+
+def _validate_baseline_report(report: EvaluationReport) -> None:
+    if not report.reranker_active:
+        raise RuntimeError("Cannot write baseline because reranker fallback was used")
+    for name, mode in (("semantic", report.semantic), ("hybrid", report.hybrid)):
+        if (
+            mode.recall_at_k != _EXPECTED_CONTROL_RECALL
+            or mode.mrr != _EXPECTED_CONTROL_MRR
+        ):
+            raise RuntimeError(f"Cannot write baseline because {name} control changed")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -13,6 +13,14 @@
     "dimension": 384,
     "sentence_transformers_version": "6.0.1"
   },
+  "reranker": {
+    "provider": "CrossEncoderRerankingProvider",
+    "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "active": true,
+    "candidate_multiplier": 2,
+    "max_candidates": 100,
+    "sentence_transformers_version": "6.0.1"
+  },
   "evaluation": {
     "k_values": [
       1,
@@ -1305,6 +1313,647 @@
               "rank": 10,
               "path": "src/api/routes.py",
               "symbol": "register_routes"
+            }
+          ]
+        }
+      ]
+    },
+    "reranked": {
+      "recall_at_k": {
+        "1": 0.7,
+        "3": 0.9,
+        "5": 0.95,
+        "10": 1.0
+      },
+      "mrr": 0.9,
+      "questions": [
+        {
+          "id": "credential-verification",
+          "recall_at_k": {
+            "1": 0.0,
+            "3": 0.5,
+            "5": 0.5,
+            "10": 1.0
+          },
+          "reciprocal_rank": 0.5,
+          "first_relevant_rank": 2,
+          "results": [
+            {
+              "rank": 1,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 2,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 3,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 4,
+              "path": "src/api/routes.py",
+              "symbol": "login_endpoint"
+            },
+            {
+              "rank": 5,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            },
+            {
+              "rank": 6,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            },
+            {
+              "rank": 7,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 8,
+              "path": "src/database/session.py",
+              "symbol": "create_database_session"
+            },
+            {
+              "rank": 9,
+              "path": "src/workers/retry.ts",
+              "symbol": "retryFailedJob"
+            },
+            {
+              "rank": 10,
+              "path": "src/auth/service.py",
+              "symbol": null
+            }
+          ]
+        },
+        {
+          "id": "token-lifecycle",
+          "recall_at_k": {
+            "1": 0.5,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 2,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            },
+            {
+              "rank": 3,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 4,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 5,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 6,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 7,
+              "path": "src/database/session.py",
+              "symbol": "create_database_session"
+            },
+            {
+              "rank": 8,
+              "path": "README.md",
+              "symbol": "Atlas Service"
+            },
+            {
+              "rank": 9,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 10,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            }
+          ]
+        },
+        {
+          "id": "job-retry",
+          "recall_at_k": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 0.5,
+          "first_relevant_rank": 2,
+          "results": [
+            {
+              "rank": 1,
+              "path": "README.md",
+              "symbol": "Background jobs"
+            },
+            {
+              "rank": 2,
+              "path": "src/workers/retry.ts",
+              "symbol": "RetryPolicy"
+            },
+            {
+              "rank": 3,
+              "path": "src/workers/retry.ts",
+              "symbol": "retryFailedJob"
+            },
+            {
+              "rank": 4,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 5,
+              "path": "README.md",
+              "symbol": "Atlas Service"
+            },
+            {
+              "rank": 6,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 7,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 8,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            },
+            {
+              "rank": 9,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 10,
+              "path": "src/database/session.py",
+              "symbol": "create_database_session"
+            }
+          ]
+        },
+        {
+          "id": "login-request-flow",
+          "recall_at_k": {
+            "1": 0.5,
+            "3": 0.5,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "src/api/routes.py",
+              "symbol": "login_endpoint"
+            },
+            {
+              "rank": 2,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            },
+            {
+              "rank": 3,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 4,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 5,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 6,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 7,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 8,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            },
+            {
+              "rank": 9,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 10,
+              "path": "config/settings.yaml",
+              "symbol": null
+            }
+          ]
+        },
+        {
+          "id": "authenticate-user-definition",
+          "recall_at_k": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 2,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 3,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 4,
+              "path": "src/api/routes.py",
+              "symbol": "login_endpoint"
+            },
+            {
+              "rank": 5,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 6,
+              "path": "README.md",
+              "symbol": "Atlas Service"
+            },
+            {
+              "rank": 7,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 8,
+              "path": "config/settings.yaml",
+              "symbol": null
+            },
+            {
+              "rank": 9,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 10,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            }
+          ]
+        },
+        {
+          "id": "access-token-definition",
+          "recall_at_k": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            },
+            {
+              "rank": 2,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 3,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 4,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 5,
+              "path": "src/database/session.py",
+              "symbol": "create_database_session"
+            },
+            {
+              "rank": 6,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 7,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 8,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 9,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            },
+            {
+              "rank": 10,
+              "path": "config/settings.yaml",
+              "symbol": null
+            }
+          ]
+        },
+        {
+          "id": "jwt-secret-configuration",
+          "recall_at_k": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "config/settings.yaml",
+              "symbol": null
+            },
+            {
+              "rank": 2,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 3,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 4,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 5,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 6,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 7,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            },
+            {
+              "rank": 8,
+              "path": "src/workers/retry.ts",
+              "symbol": "retryFailedJob"
+            },
+            {
+              "rank": 9,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            },
+            {
+              "rank": 10,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            }
+          ]
+        },
+        {
+          "id": "route-registration",
+          "recall_at_k": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            },
+            {
+              "rank": 2,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 3,
+              "path": "src/api/routes.py",
+              "symbol": "login_endpoint"
+            },
+            {
+              "rank": 4,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 5,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 6,
+              "path": "config/settings.yaml",
+              "symbol": null
+            },
+            {
+              "rank": 7,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 8,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 9,
+              "path": "README.md",
+              "symbol": "Atlas Service"
+            },
+            {
+              "rank": 10,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            }
+          ]
+        },
+        {
+          "id": "database-session-creation",
+          "recall_at_k": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "src/database/session.py",
+              "symbol": "create_database_session"
+            },
+            {
+              "rank": 2,
+              "path": "config/settings.yaml",
+              "symbol": null
+            },
+            {
+              "rank": 3,
+              "path": "src/auth/tokens.py",
+              "symbol": "create_access_token"
+            },
+            {
+              "rank": 4,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 5,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 6,
+              "path": "README.md",
+              "symbol": "Atlas Service"
+            },
+            {
+              "rank": 7,
+              "path": "src/auth/service.py",
+              "symbol": "login_user"
+            },
+            {
+              "rank": 8,
+              "path": "src/workers/retry.ts",
+              "symbol": "RetryPolicy"
+            },
+            {
+              "rank": 9,
+              "path": "src/auth/tokens.py",
+              "symbol": "decode_access_token"
+            },
+            {
+              "rank": 10,
+              "path": "src/api/routes.py",
+              "symbol": "register_routes"
+            }
+          ]
+        },
+        {
+          "id": "retry-documentation",
+          "recall_at_k": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0,
+            "10": 1.0
+          },
+          "reciprocal_rank": 1.0,
+          "first_relevant_rank": 1,
+          "results": [
+            {
+              "rank": 1,
+              "path": "README.md",
+              "symbol": "Background jobs"
+            },
+            {
+              "rank": 2,
+              "path": "src/workers/retry.ts",
+              "symbol": "retryFailedJob"
+            },
+            {
+              "rank": 3,
+              "path": "src/workers/retry.ts",
+              "symbol": "RetryPolicy"
+            },
+            {
+              "rank": 4,
+              "path": "config/settings.yaml",
+              "symbol": null
+            },
+            {
+              "rank": 5,
+              "path": "src/auth/service.py",
+              "symbol": null
+            },
+            {
+              "rank": 6,
+              "path": "src/api/routes.py",
+              "symbol": null
+            },
+            {
+              "rank": 7,
+              "path": "README.md",
+              "symbol": "Atlas Service"
+            },
+            {
+              "rank": 8,
+              "path": "src/auth/service.py",
+              "symbol": "authenticate_user"
+            },
+            {
+              "rank": 9,
+              "path": "README.md",
+              "symbol": "Authentication"
+            },
+            {
+              "rank": 10,
+              "path": "src/database/session.py",
+              "symbol": "create_database_session"
             }
           ]
         }
