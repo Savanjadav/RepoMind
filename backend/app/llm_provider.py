@@ -4,6 +4,22 @@ from enum import StrEnum
 from typing import Protocol
 
 
+class LLMProviderError(RuntimeError):
+    """A language-model provider request failed."""
+
+
+class LLMUnavailableError(LLMProviderError):
+    """The language-model provider could not be reached."""
+
+
+class LLMTimeoutError(LLMProviderError):
+    """The language-model provider request timed out."""
+
+
+class LLMResponseError(LLMProviderError):
+    """The language-model provider returned a malformed response."""
+
+
 class LLMRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
