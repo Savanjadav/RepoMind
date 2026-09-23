@@ -161,6 +161,8 @@ def test_missing_repository_and_wrong_dimension_fail_before_job_or_clone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    job_count = select(func.count()).select_from(IndexingJob)
+    jobs_before = database_session.scalar(job_count)
     clone_calls = 0
 
     def unexpected_clone(source: object, workspace_root: Path) -> None:
@@ -176,6 +178,7 @@ def test_missing_repository_and_wrong_dimension_fail_before_job_or_clone(
             embedding_provider=FakeEmbeddingProvider(),
             workspace_root=tmp_path,
         )
+    assert database_session.scalar(job_count) == jobs_before
 
     repository = _repository(database_session)
     with pytest.raises(ValueError, match="dimension"):
@@ -185,6 +188,7 @@ def test_missing_repository_and_wrong_dimension_fail_before_job_or_clone(
             FakeEmbeddingProvider(dimension=3),
             tmp_path,
         )
+    assert database_session.scalar(job_count) == jobs_before
 
     invalid_source_repository = _repository(
         database_session,
@@ -197,9 +201,9 @@ def test_missing_repository_and_wrong_dimension_fail_before_job_or_clone(
             FakeEmbeddingProvider(),
             tmp_path,
         )
+    assert database_session.scalar(job_count) == jobs_before
 
     assert clone_calls == 0
-    assert database_session.scalar(select(func.count()).select_from(IndexingJob)) == 0
 
 
 @pytest.mark.parametrize("status", ["pending", "running", "completed"])
