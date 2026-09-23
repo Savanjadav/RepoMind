@@ -180,7 +180,19 @@ def test_real_pipeline_preserves_order_mapping_and_response(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "  Answer ✓ [Evidence 1]\n"}
+    assert response.json() == {
+        "answer": "  Answer ✓ [Evidence 1]\n",
+        "citations": [
+            {
+                "evidence_id": 1,
+                "repository_name": repository.name,
+                "path": "b.py",
+                "symbol_name": None,
+                "start_line": 12,
+                "end_line": 14,
+            }
+        ],
+    }
     assert api_context.embedding.calls == [(question,)]
     embedding_factory.assert_called_once_with()
     retrieval.assert_called_once_with(
@@ -208,6 +220,7 @@ def test_real_pipeline_preserves_order_mapping_and_response(
     assert formatted.text.index("Path: b.py") < formatted.text.index("Path: a.py")
     assert formatted.max_characters == 8000
     assert len(api_context.llm.calls) == 1
+    assert len(api_context.reranker.calls) == 1
     assert formatted.text in api_context.llm.calls[0][1].content
     assert "PRIVATE_OTHER_REPO" not in formatted.text
 
@@ -259,7 +272,8 @@ def test_empty_retrieval_uses_formatter_and_generator_without_llm(
     response = api_context.client.post("/ask", json=_body(repository.id))
     assert response.status_code == 200
     assert response.json() == {
-        "answer": "The available evidence is insufficient to answer the question."
+        "answer": "The available evidence is insufficient to answer the question.",
+        "citations": [],
     }
     formatter.assert_called_once_with([], max_characters=8000)
     generator.assert_called_once()
@@ -277,7 +291,7 @@ def test_empty_llm_answer_is_not_reinterpreted(
     app.dependency_overrides[ask_api.get_llm_provider] = lambda: provider
     response = api_context.client.post("/ask", json=_body(repository.id))
     assert response.status_code == 200
-    assert response.json() == {"answer": answer}
+    assert response.json() == {"answer": answer, "citations": []}
     assert len(provider.calls) == 1
 
 
@@ -569,3 +583,91 @@ def test_search_still_semantic_only(api_context: ApiContext) -> None:
     assert "cosine_distance" in response.json()["items"][0]
     assert api_context.reranker.calls == []
     assert api_context.llm.calls == ()
+
+
+@pytest.mark.parametrize(
+    ("answer", "ids"),
+    [
+        ("  [Evidence 2][Evidence 1] [Evidence 2]\n", [2, 1]),
+        ("[Evidence 99]", []),
+        ("[Evidence 99] [Evidence 1]", [1]),
+        ("no markers", []),
+        ("\n", []),
+        ("invented.py lines 900-999 [Evidence 1]", [1]),
+        ("[Evidence 01]", []),
+    ],
+)
+def test_api_citation_mapping(
+    api_context: ApiContext, answer: str, ids: list[int]
+) -> None:
+    repository = _repository(api_context)
+    _unit(api_context, repository, path="a.py")
+    _unit(api_context, repository, path="b.py", symbol=None)
+    provider = MockLLMProvider(response=answer)
+    app.dependency_overrides[ask_api.get_llm_provider] = lambda: provider
+    response = api_context.client.post("/ask", json=_body(repository.id, limit=2))
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": answer,
+        "citations": [
+            {
+                "evidence_id": index,
+                "repository_name": repository.name,
+                "path": "b.py" if index == 1 else "a.py",
+                "symbol_name": None if index == 1 else "authenticate",
+                "start_line": 12,
+                "end_line": 14,
+            }
+            for index in ids
+        ],
+    }
+    assert len(provider.calls) == 1
+    assert len(api_context.embedding.calls) == 1
+    assert len(api_context.reranker.calls) == 1
+
+
+def test_api_only_maps_included_truncated_prefix(
+    api_context: ApiContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(api_context)
+    _unit(api_context, repository, path="a.py")
+    _unit(api_context, repository, path="b.py", content="x" * 12000)
+    provider = MockLLMProvider(response="[Evidence 2] [Evidence 1]")
+    app.dependency_overrides[ask_api.get_llm_provider] = lambda: provider
+    formatter = Mock(wraps=ask_api.format_context)
+    generator = Mock(wraps=ask_api.generate_grounded_answer)
+    monkeypatch.setattr(ask_api, "format_context", formatter)
+    monkeypatch.setattr(ask_api, "generate_grounded_answer", generator)
+    response = api_context.client.post("/ask", json=_body(repository.id, limit=2))
+    assert response.status_code == 200
+    context = generator.call_args.kwargs["context"]
+    assert context.truncated is True
+    assert context.included_evidence_count == 1
+    assert "[TRUNCATED]" in context.text
+    assert response.json() == {
+        "answer": "[Evidence 2] [Evidence 1]",
+        "citations": [
+            {
+                "evidence_id": 1,
+                "repository_name": repository.name,
+                "path": "b.py",
+                "symbol_name": "authenticate",
+                "start_line": 12,
+                "end_line": 14,
+            }
+        ],
+    }
+    formatter.assert_called_once()
+
+
+def test_citation_failure_is_not_translated_as_provider_failure(
+    api_context: ApiContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(api_context)
+    _unit(api_context, repository)
+    monkeypatch.setattr(
+        ask_api, "extract_citations", Mock(side_effect=LLMProviderError("defect"))
+    )
+    response = api_context.client.post("/ask", json=_body(repository.id))
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"

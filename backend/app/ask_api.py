@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.citations import extract_citations
 from app.database import get_db_session
 from app.grounded_answer import generate_grounded_answer
 from app.llm_provider import (
@@ -49,8 +50,18 @@ class AskRequest(BaseModel):
         return value
 
 
+class CitationResponse(BaseModel):
+    evidence_id: int
+    repository_name: str
+    path: str
+    symbol_name: str | None
+    start_line: int
+    end_line: int
+
+
 class AskResponse(BaseModel):
     answer: str
+    citations: list[CitationResponse]
 
 
 @lru_cache(maxsize=1)
@@ -106,6 +117,7 @@ def ask(
         for result in results
     ]
     context = format_context(evidence, max_characters=ASK_CONTEXT_MAX_CHARACTERS)
+    included_evidence = tuple(evidence[: context.included_evidence_count])
     try:
         response = generate_grounded_answer(
             llm_provider, question=request.q, context=context
@@ -126,4 +138,18 @@ def ask(
         raise HTTPException(
             status_code=502, detail="Language model request failed"
         ) from error
-    return AskResponse(answer=response.content)
+    citations = extract_citations(response.content, included_evidence=included_evidence)
+    return AskResponse(
+        answer=response.content,
+        citations=[
+            CitationResponse(
+                evidence_id=citation.evidence_id,
+                repository_name=citation.repository_name,
+                path=citation.path,
+                symbol_name=citation.symbol_name,
+                start_line=citation.start_line,
+                end_line=citation.end_line,
+            )
+            for citation in citations
+        ],
+    )
