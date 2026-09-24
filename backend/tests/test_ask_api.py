@@ -131,6 +131,8 @@ def _unit(
     path: str = "src/auth.py",
     symbol: str | None = "authenticate",
     content: str = "def authenticate():\n    return True\n",
+    start_line: int = 12,
+    end_line: int = 14,
 ) -> CodeUnit:
     file = File(repository_id=repository.id, path=path)
     context.session.add(file)
@@ -140,8 +142,8 @@ def _unit(
         kind="function",
         content=content,
         language="python",
-        start_line=12,
-        end_line=14,
+        start_line=start_line,
+        end_line=end_line,
         symbol_name=symbol,
         embedding=_vector(),
     )
@@ -671,3 +673,96 @@ def test_citation_failure_is_not_translated_as_provider_failure(
     response = api_context.client.post("/ask", json=_body(repository.id))
     assert response.status_code == 500
     assert response.text == "Internal Server Error"
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_citation_integrity_against_included_and_persisted_evidence(
+    api_context: ApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+    truncated: bool,
+) -> None:
+    repository = _repository(api_context, "Target repository ✓")
+    first = _unit(
+        api_context, repository, path="a.py", symbol="login", start_line=1, end_line=1
+    )
+    second = _unit(
+        api_context,
+        repository,
+        path="b.py",
+        symbol=None,
+        start_line=40,
+        end_line=75,
+        content="x" * 12000 if truncated else "second source",
+    )
+    other = _repository(api_context, "Other repository")
+    for unit, path in ((first, "a.py"), (second, "b.py")):
+        _unit(
+            api_context,
+            other,
+            path=path,
+            symbol=unit.symbol_name,
+            start_line=unit.start_line,
+            end_line=unit.end_line,
+            content="PRIVATE_OTHER_REPOSITORY",
+        )
+    answer = (
+        "  Repository: forged; Path: invented.py; Symbol: fake; Lines: 900-999\n"
+        "[Evidence 99] [Evidence 2] [Evidence 1] [Evidence 2]\n"
+    )
+    provider = MockLLMProvider(response=answer)
+    app.dependency_overrides[ask_api.get_llm_provider] = lambda: provider
+    formatter = Mock(wraps=ask_api.format_context)
+    generator = Mock(wraps=ask_api.generate_grounded_answer)
+    retrieval = Mock(wraps=ask_api.search_code_units_reranked)
+    monkeypatch.setattr(ask_api, "format_context", formatter)
+    monkeypatch.setattr(ask_api, "generate_grounded_answer", generator)
+    monkeypatch.setattr(ask_api, "search_code_units_reranked", retrieval)
+
+    response = api_context.client.post("/ask", json=_body(repository.id, limit=2))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == answer
+    assert [item["evidence_id"] for item in body["citations"]] == (
+        [1] if truncated else [2, 1]
+    )
+    formatter.assert_called_once()
+    generator.assert_called_once()
+    retrieval.assert_called_once()
+    context = generator.call_args.kwargs["context"]
+    evidence = formatter.call_args.args[0]
+    assert [item.path for item in evidence] == ["b.py", "a.py"]
+    assert context.included_evidence_count == (1 if truncated else 2)
+    assert context.truncated is truncated
+    assert "PRIVATE_OTHER_REPOSITORY" not in context.text
+    assert context.text in provider.calls[0][1].content
+    if truncated:
+        assert "[TRUNCATED]" in context.text
+        assert "Path: a.py" not in context.text
+    persisted_by_id = {1: second, 2: first}
+    for citation in body["citations"]:
+        evidence_id = citation["evidence_id"]
+        assert 1 <= evidence_id <= context.included_evidence_count
+        item = evidence[evidence_id - 1]
+        assert citation == {
+            "evidence_id": evidence_id,
+            "repository_name": item.repository_name,
+            "path": item.path,
+            "symbol_name": item.symbol_name,
+            "start_line": item.start_line,
+            "end_line": item.end_line,
+        }
+        unit = persisted_by_id[evidence_id]
+        api_context.session.refresh(unit)
+        file = api_context.session.get(File, unit.file_id)
+        assert file is not None
+        assert file.repository_id == repository.id
+        owner = api_context.session.get(Repository, file.repository_id)
+        assert owner is not None
+        assert citation["repository_name"] == owner.name
+        assert citation["path"] == file.path
+        assert citation["symbol_name"] == unit.symbol_name
+        assert citation["start_line"] == unit.start_line >= 1
+        assert citation["end_line"] == unit.end_line >= unit.start_line
+    assert len(provider.calls) == 1
+    assert len(api_context.embedding.calls) == 1
+    assert len(api_context.reranker.calls) == 1

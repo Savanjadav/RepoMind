@@ -78,8 +78,8 @@ def test_named_symbol_and_multi_digit_id() -> None:
 
 @pytest.mark.parametrize("mode", ["all", "partial", "zero", "omitted", "none"])
 def test_real_formatter_included_prefix(mode: str) -> None:
-    first = _evidence("first.py")
-    second = _evidence("second.py", "x" * 500)
+    first = ContextEvidence("first repo", "first.py", None, 1, 1, "return True")
+    second = ContextEvidence("second repo", "second.py", "worker", 40, 75, "x" * 500)
     evidence = [first, second]
     first_text = format_context([first], max_characters=10000).text
     # A real formatter result with metadata plus a zero-character source prefix.
@@ -98,15 +98,25 @@ def test_real_formatter_included_prefix(mode: str) -> None:
     context = format_context(evidence, max_characters=budget)
     included = tuple(evidence[: context.included_evidence_count])
     citations = extract_citations(
-        "[Evidence 2] [Evidence 1]", included_evidence=included
+        "[Evidence 99] [Evidence 2] [Evidence 1]", included_evidence=included
     )
     expected = [2, 1] if mode in {"all", "partial", "zero"} else [1]
     if mode == "none":
         expected = []
     assert [citation.evidence_id for citation in citations] == expected
-    assert all(
-        (citation.start_line, citation.end_line) == (4, 6) for citation in citations
-    )
+    for citation in citations:
+        assert 1 <= citation.evidence_id <= context.included_evidence_count
+        item = included[citation.evidence_id - 1]
+        assert citation == Citation(
+            citation.evidence_id,
+            item.repository_name,
+            item.path,
+            item.symbol_name,
+            item.start_line,
+            item.end_line,
+        )
+        assert citation.start_line >= 1
+        assert citation.end_line >= citation.start_line
     assert context.truncated is (mode != "all")
     if mode == "zero":
         assert "Content-Characters: 0/500" in context.text
@@ -129,3 +139,18 @@ def test_generated_metadata_is_not_used() -> None:
         included_evidence=[_evidence()],
     )
     assert result == [Citation(1, "  Répo 東京  ", "src/a.py", None, 4, 6)]
+
+
+def test_distinct_ids_with_identical_metadata_remain_distinct() -> None:
+    first = _evidence(content="first source")
+    second = _evidence(content="second source")
+    context = format_context([first, second], max_characters=2000)
+    assert context.included_evidence_count == 2
+    result = extract_citations(
+        "[Evidence 2] [Evidence 1] [Evidence 2]",
+        included_evidence=[first, second],
+    )
+    assert result == [
+        Citation(2, first.repository_name, first.path, None, 4, 6),
+        Citation(1, first.repository_name, first.path, None, 4, 6),
+    ]
