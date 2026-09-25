@@ -380,10 +380,19 @@ def test_migration_schema_matches_model(database_session: Session) -> None:
         "ck_code_units_kind",
         "ck_code_units_start_line_positive",
     }
-    assert {index["name"] for index in inspector.get_indexes("code_units")} == {
+    indexes = {index["name"]: index for index in inspector.get_indexes("code_units")}
+    assert set(indexes) == {
         "ix_code_units_embedding_hnsw",
         "ix_code_units_file_id",
+        "uq_code_units_file_id_id",
     }
+    assert indexes["uq_code_units_file_id_id"]["unique"] is True
+    assert indexes["uq_code_units_file_id_id"]["column_names"] == ["file_id", "id"]
+    uniqueness = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("code_units")
+    }
+    assert uniqueness["uq_code_units_file_id_id"] == ["file_id", "id"]
 
 
 def test_service_leaves_transaction_control_to_caller(

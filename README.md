@@ -50,6 +50,37 @@ structural map, not compiler-grade or runtime dependency analysis. Existing
 repositories are not automatically backfilled. Relationships do not currently
 expand retrieval results.
 
+### Local Call Hints
+
+Indexing also records separate CodeUnit → CodeUnit `calls` relationships. A hint
+means a direct call in an eligible function body has an unambiguous local binding
+under conservative static rules—not that it executes or that dynamic dispatch is
+understood. Recursion is allowed; repeated caller/callee pairs produce one edge.
+
+- Python supports undecorated module-level functions (including async), direct
+  calls, explicit `from` imports/aliases, and module-qualified calls through simple
+  imports or explicit module aliases. Conventional local module resolution is
+  shared with the import graph; imported re-exports are not followed.
+- JS/TS supports module-level function declarations and function-valued `const`
+  bindings, named imports/aliases, explicit named default function imports, and
+  namespace calls to direct exports. Only the existing relative ES module forms
+  are resolved; type-only imports create no runtime call hints.
+- Shadowing, rebinding, duplicate definitions, ambiguous endpoints, unsupported
+  scopes, wildcard imports, constructors, methods, nested callable bodies,
+  assignment aliases, dynamic calls and re-export chains are omitted. Conservative
+  invalidation can omit otherwise valid calls; this is not compiler symbol binding.
+
+Analysis uses the already-read full-file source and persisted CodeUnit identities.
+It never executes repository code or makes additional embedding/model calls.
+Files with more than 10,000 call occurrences have their call analysis discarded;
+repository runs retain at most 10,000 distinct edges in stable path/source order.
+The graph is intentionally partial. Database constraints enforce repository,
+file, and CodeUnit ownership, uniqueness, and cascading deletion. Call hints are
+flushed inside the existing indexing savepoint, without committing the caller's
+transaction. Migration 0006 adds this separate table; it does not backfill existing
+repositories. Graph-aware retrieval, traversal APIs and visualization are not
+implemented.
+
 ### Safe Repository Ingestion
 
 - Validation for supported HTTPS repository URLs and local-path source values.
@@ -178,7 +209,7 @@ PostgreSQL + pgvector
 ```
 
 The indexing service orchestrates these components, then resolves and persists
-local import relationships inside the same indexing savepoint. Failures roll
+local import relationships and call hints inside the same indexing savepoint. Failures roll
 back derived data; the caller controls the outer transaction.
 
 ## Target v0.1.0 Workflow
@@ -346,8 +377,9 @@ uvicorn app.main:app --reload
 ```
 
 Existing installations must also run `alembic upgrade head` to apply migration
-0005 (the relationships table and File ownership constraint). No additional
-service or dependency is required, and the migration does not backfill imports.
+0005 (file imports) and 0006 (CodeUnit call hints and endpoint ownership
+constraints). No additional service or dependency is required, and these
+migrations do not backfill relationships.
 
 The API is then available at `http://127.0.0.1:8000`. The application requires
 `DATABASE_URL` for database-backed endpoints. No current API endpoint registers,
@@ -431,5 +463,5 @@ features.
 RepoMind is under active development. The ingestion, parsing, persistence,
 code-unit inspection, local embedding, and pgvector storage foundations are
 implemented and tested. The indexing pipeline also records conservative local
-file-import relationships. Call/reference analysis and relationship-driven
-retrieval expansion are not implemented by this import-indexing stage.
+file-import relationships and bounded local call hints. Relationship-driven
+retrieval expansion is not implemented.

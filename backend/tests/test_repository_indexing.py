@@ -9,10 +9,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import app.repository_indexing as indexing_module
+from app.code_relationships import FileCallAnalysis
 from app.code_unit_persistence import persist_code_units
 from app.database import create_database_engine
 from app.embedding_provider import EmbeddingProvider
 from app.import_relationships import ImportReference
+from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.indexing_job import IndexingJob
@@ -145,6 +147,95 @@ def test_import_relationships_share_indexing_transaction(
 def _vector_for_text(text: str) -> list[float]:
     marker = float(sum(ord(character) for character in text))
     return [marker, float(len(text)), *([0.0] * (EMBEDDING_DIMENSION - 2))]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("fail_calls", [False, True])
+def test_calls_share_indexing_savepoint_and_preserve_embeddings(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reverse: bool,
+    fail_calls: bool,
+) -> None:
+    repository = _repository(database_session)
+    _install_offline_clone(
+        monkeypatch,
+        {
+            "a.py": b"from z import helper\ndef caller():\n helper()\n helper()\n",
+            "z.py": b"def helper(): pass\n",
+        },
+    )
+    discover = indexing_module.discover_repository_files
+    if reverse:
+        monkeypatch.setattr(
+            indexing_module,
+            "discover_repository_files",
+            lambda path: list(reversed(discover(path))),
+        )
+    original = indexing_module.persist_call_relationships
+    observed: list[int] = []
+
+    def persist(
+        session: Session,
+        *,
+        repository_id: UUID,
+        files_by_path: Mapping[str, File],
+        analyses: Sequence[FileCallAnalysis],
+    ) -> None:
+        original(
+            session,
+            repository_id=repository_id,
+            files_by_path=files_by_path,
+            analyses=analyses,
+        )
+        count = session.scalar(
+            select(func.count())
+            .select_from(CodeRelationship)
+            .where(CodeRelationship.repository_id == repository_id)
+        )
+        assert count == 1
+        observed.append(count)
+        if fail_calls:
+            raise RuntimeError("call persistence failure")
+
+    monkeypatch.setattr(indexing_module, "persist_call_relationships", persist)
+    provider = FakeEmbeddingProvider()
+    if fail_calls:
+        with pytest.raises(RuntimeError, match="call persistence failure"):
+            _index(database_session, repository, provider, tmp_path)
+    else:
+        _index(database_session, repository, provider, tmp_path)
+    assert observed == [1]
+    expected = [
+        "from z import helper",
+        "def caller():\n helper()\n helper()",
+        "def helper(): pass",
+    ]
+    if reverse:
+        expected = [expected[-1], *expected[:-1]]
+    assert provider.batches == [tuple(expected)]
+    units = database_session.scalars(
+        select(CodeUnit).join(File).where(File.repository_id == repository.id)
+    ).all()
+    assert len(units) == (0 if fail_calls else 3)
+    for model in (File, Relationship, CodeRelationship):
+        count = database_session.scalar(
+            select(func.count())
+            .select_from(model)
+            .where(model.repository_id == repository.id)
+        )
+        assert count == (0 if fail_calls else 2 if model is File else 1)
+    if not fail_calls:
+        edge = database_session.scalar(
+            select(CodeRelationship).where(
+                CodeRelationship.repository_id == repository.id
+            )
+        )
+        assert edge is not None
+        by_id = {unit.id: unit for unit in units}
+        assert by_id[edge.source_code_unit_id].symbol_name == "caller"
+        assert by_id[edge.target_code_unit_id].symbol_name == "helper"
 
 
 def _repository(

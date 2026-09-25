@@ -9,6 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.code_parser import CodeParser
+from app.code_relationships import (
+    FileCallAnalysis,
+    analyze_calls,
+    persist_call_relationships,
+)
 from app.code_unit_embedding_persistence import (
     CodeUnitEmbedding,
     persist_code_unit_embeddings,
@@ -157,6 +162,7 @@ def _index_cloned_repository(
     }
     embedding_batch: list[CodeUnit] = []
     imports: list[ImportReference] = []
+    call_analyses: list[FileCallAnalysis] = []
 
     for candidate in candidates:
         parser = _parser_for_path(candidate.relative_path, parsers)
@@ -174,8 +180,17 @@ def _index_cloned_repository(
         file = files_by_path.get(candidate.relative_path)
         if file is None:
             raise RepositoryIndexingError("Persisted repository file is missing")
-        embedding_batch.extend(persist_code_units(session, file.id, parsed_units))
+        stored_units = persist_code_units(session, file.id, parsed_units)
+        embedding_batch.extend(stored_units)
         imports.extend(extract_imports(parsed_units))
+        call_analyses.append(
+            analyze_calls(
+                content=content,
+                file=file,
+                language=parsed_units[0].language,
+                units=stored_units,
+            )
+        )
 
         while len(embedding_batch) >= EMBEDDING_BATCH_SIZE:
             batch = embedding_batch[:EMBEDDING_BATCH_SIZE]
@@ -189,6 +204,12 @@ def _index_cloned_repository(
         repository_id=repository_id,
         files_by_path=files_by_path,
         references=imports,
+    )
+    persist_call_relationships(
+        session,
+        repository_id=repository_id,
+        files_by_path=files_by_path,
+        analyses=call_analyses,
     )
 
 

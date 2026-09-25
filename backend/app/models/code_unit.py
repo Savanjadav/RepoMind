@@ -2,7 +2,15 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import VECTOR
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -16,6 +24,7 @@ EMBEDDING_DIMENSION = 384
 class CodeUnit(Base):
     __tablename__ = "code_units"
     __table_args__ = (
+        UniqueConstraint("file_id", "id", name="uq_code_units_file_id_id"),
         CheckConstraint(
             "kind IN ('class', 'config', 'document', 'function', 'import')",
             name="ck_code_units_kind",
