@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 class File(Base):
     __tablename__ = "files"
     __table_args__ = (
+        UniqueConstraint("repository_id", "id", name="uq_files_repository_id_id"),
         UniqueConstraint(
             "repository_id",
             "path",

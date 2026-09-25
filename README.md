@@ -24,6 +24,31 @@ answers that can be checked against source files and line ranges.
 - Exact source content, language, symbol, path relationship, and inclusive line
   ranges preserved in persisted code units.
 - Nullable 384-dimensional CodeUnit embeddings stored through pgvector.
+- Repository-owned File → File `imports` relationships, with database-enforced
+  same-repository endpoints, deduplication, and cascading deletion.
+
+### Local Import Relationships
+
+Indexing records a lightweight, static import graph after parsing all safely
+discovered files. Relationships refer to files, not resolved symbols or runtime
+calls. Repeated imports produce one edge; self-imports are omitted.
+
+- Python supports conventional `__init__.py` packages, package-relative imports,
+  and repository-root absolute modules. Explicit modules are resolved, not
+  imported names; aliases and wildcards do not expand symbol dependencies.
+- JavaScript/TypeScript supports static relative ES imports, including side-effect
+  and type imports, to `.js`, `.jsx`, or `.ts` files. Extensionless paths also
+  consider those extensions and directory `index` files, requiring one match.
+- Missing or ambiguous targets, standard-library/builtin Python modules, external
+  packages, inferred Python source roots/namespace packages, JS aliases, escaped
+  specifiers, dynamic imports, `require`, re-exports, and package/tsconfig resolution
+  are not indexed as relationships.
+
+Resolution uses only the current run's discovered file inventory, never executes
+repository code, and makes no model/network calls. This is a conservative
+structural map, not compiler-grade or runtime dependency analysis. Existing
+repositories are not automatically backfilled. Relationships do not currently
+expand retrieval results.
 
 ### Safe Repository Ingestion
 
@@ -152,8 +177,9 @@ Sentence Transformers
 PostgreSQL + pgvector
 ```
 
-These components exist today, but the full repository-to-embedding flow is not
-yet orchestrated as one end-to-end indexing operation.
+The indexing service orchestrates these components, then resolves and persists
+local import relationships inside the same indexing savepoint. Failures roll
+back derived data; the caller controls the outer transaction.
 
 ## Target v0.1.0 Workflow
 
@@ -319,6 +345,10 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
+Existing installations must also run `alembic upgrade head` to apply migration
+0005 (the relationships table and File ownership constraint). No additional
+service or dependency is required, and the migration does not backfill imports.
+
 The API is then available at `http://127.0.0.1:8000`. The application requires
 `DATABASE_URL` for database-backed endpoints. No current API endpoint registers,
 clones, or indexes a repository end to end; the code-unit browser operates on
@@ -400,7 +430,6 @@ features.
 
 RepoMind is under active development. The ingestion, parsing, persistence,
 code-unit inspection, local embedding, and pgvector storage foundations are
-implemented and tested. The next major milestone is connecting these components
-into an end-to-end repository indexing pipeline, followed by semantic and
-hybrid retrieval, grounded local-LLM question answering, and the browser
-interface.
+implemented and tested. The indexing pipeline also records conservative local
+file-import relationships. Call/reference analysis and relationship-driven
+retrieval expansion are not implemented by this import-indexing stage.

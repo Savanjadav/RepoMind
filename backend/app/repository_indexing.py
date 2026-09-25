@@ -15,6 +15,11 @@ from app.code_unit_embedding_persistence import (
 )
 from app.code_unit_persistence import persist_code_units
 from app.embedding_provider import EmbeddingProvider
+from app.import_relationships import (
+    ImportReference,
+    extract_imports,
+    persist_import_relationships,
+)
 from app.javascript_typescript_code_parser import (
     JavaScriptCodeParser,
     TypeScriptCodeParser,
@@ -151,6 +156,7 @@ def _index_cloned_repository(
         "typescript": TypeScriptCodeParser(),
     }
     embedding_batch: list[CodeUnit] = []
+    imports: list[ImportReference] = []
 
     for candidate in candidates:
         parser = _parser_for_path(candidate.relative_path, parsers)
@@ -169,6 +175,7 @@ def _index_cloned_repository(
         if file is None:
             raise RepositoryIndexingError("Persisted repository file is missing")
         embedding_batch.extend(persist_code_units(session, file.id, parsed_units))
+        imports.extend(extract_imports(parsed_units))
 
         while len(embedding_batch) >= EMBEDDING_BATCH_SIZE:
             batch = embedding_batch[:EMBEDDING_BATCH_SIZE]
@@ -177,6 +184,12 @@ def _index_cloned_repository(
 
     if embedding_batch:
         _embed_and_persist(session, embedding_provider, embedding_batch)
+    persist_import_relationships(
+        session,
+        repository_id=repository_id,
+        files_by_path=files_by_path,
+        references=imports,
+    )
 
 
 def _persisted_files_by_path(

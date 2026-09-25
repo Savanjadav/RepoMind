@@ -1,8 +1,8 @@
 import os
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -12,9 +12,11 @@ import app.repository_indexing as indexing_module
 from app.code_unit_persistence import persist_code_units
 from app.database import create_database_engine
 from app.embedding_provider import EmbeddingProvider
+from app.import_relationships import ImportReference
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.indexing_job import IndexingJob
+from app.models.relationship import Relationship
 from app.models.repository import Repository
 from app.repository_clone import ClonedRepository, RepositoryCloneError
 from app.repository_files import RepositoryFileCandidate
@@ -71,6 +73,73 @@ class FakeEmbeddingProvider:
 
 def _use_provider(provider: EmbeddingProvider) -> EmbeddingProvider:
     return provider
+
+
+@pytest.mark.parametrize("fail_relationships", [False, True])
+def test_import_relationships_share_indexing_transaction(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_relationships: bool,
+) -> None:
+    repository = _repository(database_session)
+    _install_offline_clone(
+        monkeypatch,
+        {
+            "a.py": b"import z\nimport z\n",
+            "z.py": b"",
+        },
+    )
+    provider = FakeEmbeddingProvider()
+    original = indexing_module.persist_import_relationships
+    if fail_relationships:
+        # Exercise a failure after relationships have actually been flushed.
+        def persist_then_fail(
+            session: Session,
+            *,
+            repository_id: UUID,
+            files_by_path: Mapping[str, File],
+            references: Sequence[ImportReference],
+        ) -> None:
+            original(
+                session,
+                repository_id=repository_id,
+                files_by_path=files_by_path,
+                references=references,
+            )
+            raise RuntimeError("relationship failure")
+
+        monkeypatch.setattr(
+            indexing_module,
+            "persist_import_relationships",
+            persist_then_fail,
+        )
+        with pytest.raises(RuntimeError, match="relationship failure"):
+            _index(database_session, repository, provider, tmp_path)
+    else:
+        job = _index(database_session, repository, provider, tmp_path)
+        assert job.status == "completed"
+    edges = database_session.scalars(
+        select(Relationship).where(Relationship.repository_id == repository.id)
+    ).all()
+    assert len(edges) == (0 if fail_relationships else 1)
+    files = database_session.scalars(
+        select(File).where(File.repository_id == repository.id)
+    ).all()
+    if fail_relationships:
+        assert files == []
+    else:
+        paths = {file.id: file.path for file in files}
+        assert (paths[edges[0].source_file_id], paths[edges[0].target_file_id]) == (
+            "a.py",
+            "z.py",
+        )
+        units = database_session.scalars(
+            select(CodeUnit).join(File).where(File.repository_id == repository.id)
+        ).all()
+        assert len(units) == 2
+        assert all(unit.embedding is not None for unit in units)
+    assert provider.batches == [("import z", "import z")]
 
 
 def _vector_for_text(text: str) -> list[float]:
