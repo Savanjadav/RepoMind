@@ -80,7 +80,7 @@ file, and CodeUnit ownership, uniqueness, and cascading deletion. Call hints are
 flushed inside the existing indexing savepoint, without committing the caller's
 transaction. Migration 0006 adds this separate table; it does not backfill existing
 repositories. `/ask` uses the bounded outgoing-call expansion described below.
-Traversal APIs and visualization are not implemented.
+General graph traversal APIs and visualization are not implemented.
 
 ### Dependency-Aware Answer Evidence
 
@@ -101,6 +101,24 @@ Expansion reads persisted data only, without new embedding/model calls. The
 existing 8,000-character context budget still applies and may omit appended
 neighbors. Call hints are intentionally incomplete, not compiler-precise or
 proof of runtime behavior. No automatic backfill or reindexing is performed.
+
+### Basic Impact Analysis
+
+`GET /repositories/{repository_id}/impact` returns likely direct dependents from
+persisted graph edges. An exact `path` selects file mode: incoming File `imports`
+edges identify direct importers. Adding an exact `symbol` selects symbol mode:
+incoming CodeUnit `calls` edges identify direct callers. This is one hop only,
+not recursive traversal. `/ask`'s outgoing callee expansion remains separate.
+
+Responses contain the persisted target and dependent metadata, `analysis:
+"static_hint"`, `limit`, and `truncated`. Caller line ranges describe the caller
+CodeUnit, not exact call sites; file-level items have null symbol/line metadata.
+No source content, ranking scores, or model-generated answer is returned.
+
+These conservative static hints neither predict breakage nor cover all runtime
+dependencies. An empty result means no matching stored direct hints were found,
+not that a change is safe. `truncated=false` likewise describes only the stored
+direct results, not real-world completeness. No model calls or writes occur.
 
 ### Safe Repository Ingestion
 
@@ -411,6 +429,21 @@ clones, or indexes a repository end to end; the code-unit browser operates on
 already-persisted database state.
 
 ## Current API
+
+### Repository Impact
+
+`GET /repositories/{repository_id}/impact` accepts required `path` (exact relative
+POSIX path, 1–2,000 characters), optional `symbol` (exact non-whitespace name,
+1–2,000 characters), and `limit` (default 20, range 1–100). Controls and malformed
+paths are rejected; accepted spelling is preserved. Missing repositories, files,
+or symbols return 404. Multiple exact symbol matches in the file return 409,
+without guessing by kind or line range. Invalid input returns 422.
+
+File results are ordered by path then File ID. Caller results are ordered by path,
+start line, descending end line, kind, then CodeUnit ID; identities are unique.
+Recursive self-calls are excluded. At most `limit` items are returned, with
+`truncated=true` when an additional stored direct dependent exists. Valid targets
+without incoming hints return 200 with an empty `items` list.
 
 ### Repository Questions
 
