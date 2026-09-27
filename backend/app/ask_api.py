@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.citations import extract_citations
 from app.database import get_db_session
+from app.dependency_expansion import search_code_units_with_dependencies
 from app.grounded_answer import generate_grounded_answer
 from app.llm_provider import (
     LLMProvider,
@@ -19,7 +20,6 @@ from app.llm_provider import (
 from app.models.code_unit import EMBEDDING_DIMENSION
 from app.models.repository import Repository
 from app.rag_context import ContextEvidence, format_context
-from app.reranked_search import search_code_units_reranked
 from app.reranking_provider import RerankingProvider
 from app.search_api import get_embedding_provider
 
@@ -96,7 +96,7 @@ def ask(
     if len(vectors) != 1:
         raise RuntimeError("Embedding provider returned an unexpected vector count")
 
-    results = search_code_units_reranked(
+    results = search_code_units_with_dependencies(
         session,
         repository_id=request.repository_id,
         query=request.q,

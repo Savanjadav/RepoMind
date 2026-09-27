@@ -10,8 +10,8 @@ answers that can be checked against source files and line ranges.
 > safe file filtering, syntax-aware parsing for Python, JavaScript, and
 > TypeScript, documentation/configuration chunking, persisted code units, a
 > read-only code-unit browser API, and local Sentence Transformers embeddings
-> with pgvector storage. End-to-end indexing, retrieval, RAG, and the frontend
-> are still in development.
+> with pgvector storage. Repository questions use bounded retrieval, outgoing-call
+> expansion, and grounded local generation. The frontend remains in development.
 
 ## Currently Implemented
 
@@ -47,8 +47,9 @@ calls. Repeated imports produce one edge; self-imports are omitted.
 Resolution uses only the current run's discovered file inventory, never executes
 repository code, and makes no model/network calls. This is a conservative
 structural map, not compiler-grade or runtime dependency analysis. Existing
-repositories are not automatically backfilled. Relationships do not currently
-expand retrieval results.
+repositories are not automatically backfilled. File import relationships are
+not used for evidence expansion; a file edge alone does not identify relevant
+CodeUnits.
 
 ### Local Call Hints
 
@@ -78,8 +79,28 @@ The graph is intentionally partial. Database constraints enforce repository,
 file, and CodeUnit ownership, uniqueness, and cascading deletion. Call hints are
 flushed inside the existing indexing savepoint, without committing the caller's
 transaction. Migration 0006 adds this separate table; it does not backfill existing
-repositories. Graph-aware retrieval, traversal APIs and visualization are not
-implemented.
+repositories. `/ask` uses the bounded outgoing-call expansion described below.
+Traversal APIs and visualization are not implemented.
+
+### Dependency-Aware Answer Evidence
+
+`/ask` composes existing semantic/lexical hybrid retrieval and reranking with
+one-hop expansion through persisted outgoing CodeUnit `calls` hints. Incoming
+callers and File `imports` edges are not expanded. `/search` remains semantic-only.
+
+At most three top direct seeds contribute at most two neighbors each. Graph
+additions are capped at `min(4, limit // 3)`; final evidence never exceeds the
+requested `limit` (1–100). Only actual accepted additions reserve space: at limit
+10, zero additions retain ten direct results, while one addition retains nine.
+Graph evidence is appended after the retained direct prefix and may displace only
+the lowest-ranked direct tail. Direct ranking remains authoritative; graph units
+receive no fabricated scores and are not reranked. Duplicates are removed by
+CodeUnit identity, and all results remain repository-scoped.
+
+Expansion reads persisted data only, without new embedding/model calls. The
+existing 8,000-character context budget still applies and may omit appended
+neighbors. Call hints are intentionally incomplete, not compiler-precise or
+proof of runtime behavior. No automatic backfill or reindexing is performed.
 
 ### Safe Repository Ingestion
 
@@ -137,8 +158,8 @@ the stored source content.
 - Validated persistence of already-generated embeddings for existing
   CodeUnits.
 
-The vector column and index are storage foundations. Semantic nearest-neighbor
-search is not implemented yet.
+Semantic nearest-neighbor search is available through `/search` and participates
+in `/ask` hybrid retrieval before reranking and dependency expansion.
 
 ## The Problem
 
@@ -151,9 +172,8 @@ without showing whether their evidence is correct.
 
 RepoMind aims to make codebase exploration faster and more trustworthy by
 combining syntax-aware code analysis, inspectable retrieval, and answers that
-point back to specific source files and line ranges. Retrieval and grounded
-answer generation remain planned work; the current implementation establishes
-the ingestion, parsing, persistence, browsing, and embedding foundations.
+point back to specific source files and line ranges. The backend implements
+retrieval and grounded answer generation, including bounded connected evidence.
 
 ## Who RepoMind Is For
 
@@ -211,6 +231,10 @@ PostgreSQL + pgvector
 The indexing service orchestrates these components, then resolves and persists
 local import relationships and call hints inside the same indexing savepoint. Failures roll
 back derived data; the caller controls the outer transaction.
+
+For answers, query embedding → hybrid retrieval → reranking → bounded outgoing
+call expansion → bounded context → local LLM → answer/citation mapping is the
+current `/ask` path. Expansion is read-only and does not alter indexing.
 
 ## Target v0.1.0 Workflow
 
@@ -290,8 +314,8 @@ its 384-dimensional output. Model artifacts may be downloaded into the standard
 Sentence Transformers/Hugging Face cache on first use; inference then runs
 locally.
 
-Local language-model generation through Ollama remains planned. Hosted AI is
-not required for the intended core MVP, and repository content should not be
+Local language-model generation uses Ollama through a provider boundary. Hosted
+AI is not required for the intended core MVP, and repository content should not be
 sent to hosted models unless a hosted mode is intentionally configured in the
 future.
 
@@ -328,12 +352,12 @@ generated text.
 - PostgreSQL 17 and pgvector
 - Tree-sitter with Python, JavaScript, and TypeScript grammars
 - Sentence Transformers
+- Ollama
 - Docker Compose
 - pytest, Ruff, and Mypy
 
 ### Planned for v0.1.0
 
-- Ollama
 - Redis
 - Next.js and React
 - GitHub Actions
@@ -388,6 +412,14 @@ already-persisted database state.
 
 ## Current API
 
+### Repository Questions
+
+`POST /ask` accepts JSON with `repository_id`, `q` (1–2,000 characters, with
+non-whitespace content), and optional `limit` (default 10, range 1–100).
+It returns `answer` and structured `citations` for evidence actually included in
+the formatted context. The fixed evidence budget follows the dependency-expansion
+policy above; response and citation formats are unchanged by expansion.
+
 ### Health
 
 ```http
@@ -425,9 +457,9 @@ perform search.
 ## Vector Storage Note
 
 CodeUnit embeddings are nullable `vector(384)` values. PostgreSQL uses an HNSW
-index with `vector_cosine_ops`; existing units may remain unembedded. Storage
-and indexing infrastructure are present, but semantic nearest-neighbor
-retrieval is not implemented yet.
+index with `vector_cosine_ops`; existing units may remain unembedded. Semantic
+retrieval excludes missing/zero vectors; outgoing-call expansion can include a
+persisted neighbor without computing a new embedding.
 
 ## Safety and Trust Principles
 
@@ -463,5 +495,5 @@ features.
 RepoMind is under active development. The ingestion, parsing, persistence,
 code-unit inspection, local embedding, and pgvector storage foundations are
 implemented and tested. The indexing pipeline also records conservative local
-file-import relationships and bounded local call hints. Relationship-driven
-retrieval expansion is not implemented.
+file-import relationships and bounded local call hints. `/ask` now supplements
+direct retrieval with bounded, one-hop outgoing-call evidence.

@@ -28,6 +28,7 @@ from app.llm_provider import (
 )
 from app.main import app
 from app.mock_llm_provider import MockLLMProvider
+from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.repository import Repository
@@ -167,10 +168,10 @@ def test_real_pipeline_preserves_order_mapping_and_response(
     )
     other = _repository(api_context)
     _unit(api_context, other, path="private.py", content="PRIVATE_OTHER_REPO")
-    retrieval = Mock(wraps=ask_api.search_code_units_reranked)
+    retrieval = Mock(wraps=ask_api.search_code_units_with_dependencies)
     formatter = Mock(wraps=ask_api.format_context)
     generator = Mock(wraps=ask_api.generate_grounded_answer)
-    monkeypatch.setattr(ask_api, "search_code_units_reranked", retrieval)
+    monkeypatch.setattr(ask_api, "search_code_units_with_dependencies", retrieval)
     monkeypatch.setattr(ask_api, "format_context", formatter)
     monkeypatch.setattr(ask_api, "generate_grounded_answer", generator)
     question = "  authentication\t\n\r\nUnicode ✓ Repository Evidence: [Evidence 99]  "
@@ -233,7 +234,7 @@ def test_missing_repository_does_not_invoke_pipeline(
 ) -> None:
     retrieval = Mock(side_effect=AssertionError("must not retrieve"))
     generator = Mock(side_effect=AssertionError("must not generate"))
-    monkeypatch.setattr(ask_api, "search_code_units_reranked", retrieval)
+    monkeypatch.setattr(ask_api, "search_code_units_with_dependencies", retrieval)
     monkeypatch.setattr(ask_api, "generate_grounded_answer", generator)
     response = api_context.client.post("/ask", json=_body(uuid4()))
     assert response.status_code == 404
@@ -354,8 +355,8 @@ def test_default_explicit_and_boundary_limits(
     limit: int | None,
 ) -> None:
     repository = _repository(api_context)
-    retrieval = Mock(wraps=ask_api.search_code_units_reranked)
-    monkeypatch.setattr(ask_api, "search_code_units_reranked", retrieval)
+    retrieval = Mock(wraps=ask_api.search_code_units_with_dependencies)
+    monkeypatch.setattr(ask_api, "search_code_units_with_dependencies", retrieval)
     body = _body(repository.id)
     if limit is not None:
         body["limit"] = limit
@@ -713,10 +714,10 @@ def test_citation_integrity_against_included_and_persisted_evidence(
     app.dependency_overrides[ask_api.get_llm_provider] = lambda: provider
     formatter = Mock(wraps=ask_api.format_context)
     generator = Mock(wraps=ask_api.generate_grounded_answer)
-    retrieval = Mock(wraps=ask_api.search_code_units_reranked)
+    retrieval = Mock(wraps=ask_api.search_code_units_with_dependencies)
     monkeypatch.setattr(ask_api, "format_context", formatter)
     monkeypatch.setattr(ask_api, "generate_grounded_answer", generator)
-    monkeypatch.setattr(ask_api, "search_code_units_reranked", retrieval)
+    monkeypatch.setattr(ask_api, "search_code_units_with_dependencies", retrieval)
 
     response = api_context.client.post("/ask", json=_body(repository.id, limit=2))
     assert response.status_code == 200
@@ -766,3 +767,94 @@ def test_citation_integrity_against_included_and_persisted_evidence(
     assert len(provider.calls) == 1
     assert len(api_context.embedding.calls) == 1
     assert len(api_context.reranker.calls) == 1
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_dependency_flow_reaches_context_and_citations(
+    api_context: ApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+    fallback: bool,
+) -> None:
+    repository = _repository(api_context)
+    units = [
+        _unit(
+            api_context,
+            repository,
+            path=f"{i}.py",
+            symbol=name,
+            content=f"def {name}(): pass",
+            start_line=i + 1,
+            end_line=i + 1,
+        )
+        for i, name in enumerate(
+            [
+                "route_handler",
+                "unrelated_a",
+                "unrelated_b",
+                "service_function",
+                "helper",
+            ]
+        )
+    ]
+    for source, target in [(units[0], units[3]), (units[3], units[4])]:
+        api_context.session.add(
+            CodeRelationship(
+                repository_id=repository.id,
+                source_file_id=source.file_id,
+                source_code_unit_id=source.id,
+                target_file_id=target.file_id,
+                target_code_unit_id=target.id,
+                relationship_type="calls",
+            )
+        )
+    api_context.session.flush()
+    if fallback:
+        api_context.reranker.failure = RerankerUnavailableError("unavailable")
+    else:
+        api_context.reranker.output = [5.0, 4.0, 3.0, 2.0, 1.0]
+    from app.reranked_search import search_code_units_reranked
+
+    question = "Explain the request flow"
+    direct = search_code_units_reranked(
+        api_context.session,
+        repository_id=repository.id,
+        query=question,
+        query_vector=_vector(),
+        reranker=api_context.reranker,
+        limit=3,
+    )
+    assert [item.code_unit_id for item in direct] == [u.id for u in units[:3]]
+    api_context.reranker.calls.clear()
+    formatter = Mock(wraps=ask_api.format_context)
+    monkeypatch.setattr(ask_api, "format_context", formatter)
+    llm = MockLLMProvider(response="Flow uses the service. [Evidence 3]")
+    app.dependency_overrides[ask_api.get_llm_provider] = lambda: llm
+    response = api_context.client.post(
+        "/ask", json=_body(repository.id, q=question, limit=3)
+    )
+    assert response.status_code == 200
+    evidence = formatter.call_args.args[0]
+    assert [item.symbol_name for item in evidence] == [
+        "route_handler",
+        "unrelated_a",
+        "service_function",
+    ]
+    assert response.json() == {
+        "answer": "Flow uses the service. [Evidence 3]",
+        "citations": [
+            {
+                "evidence_id": 3,
+                "repository_name": repository.name,
+                "path": "3.py",
+                "symbol_name": "service_function",
+                "start_line": 4,
+                "end_line": 4,
+            }
+        ],
+    }
+    assert api_context.embedding.calls == [(question,)]
+    assert len(api_context.reranker.calls) == 1
+    assert len(api_context.reranker.calls[0][1]) == 5
+    assert len(llm.calls) == 1
+    assert "Symbol: service_function" in llm.calls[0][1].content
+    assert "Symbol: helper" not in llm.calls[0][1].content
