@@ -155,7 +155,9 @@ def discover_repository_files(
     repository_root: Path,
     *,
     max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
+    strict_errors: bool = False,
 ) -> list[RepositoryFileCandidate]:
+    """Discover files; strict indexing must not mistake I/O errors for deletion."""
     if max_file_size_bytes <= 0:
         raise RepositoryFileDiscoveryError("Maximum file size must be positive")
 
@@ -182,7 +184,11 @@ def discover_repository_files(
 
             try:
                 metadata = entry.stat(follow_symlinks=False)
-            except OSError:
+            except OSError as error:
+                if strict_errors:
+                    raise RepositoryFileDiscoveryError(
+                        "Repository entry could not be inspected"
+                    ) from error
                 continue
 
             if stat.S_ISLNK(metadata.st_mode):
@@ -191,7 +197,9 @@ def discover_repository_files(
             if stat.S_ISDIR(metadata.st_mode):
                 if name in _DENIED_DIRECTORY_NAMES:
                     continue
-                nested_entries = _open_nested_directory(child_path)
+                nested_entries = _open_nested_directory(
+                    child_path, strict_errors=strict_errors, initial_metadata=metadata
+                )
                 if nested_entries is not None:
                     directories.append((child_path, child_components, nested_entries))
                 continue
@@ -207,6 +215,7 @@ def discover_repository_files(
                 child_path,
                 metadata,
                 max_file_size_bytes=max_file_size_bytes,
+                strict_errors=strict_errors,
             )
             if inspected_size is None:
                 continue
@@ -240,11 +249,31 @@ def _open_root(root: Path) -> list[os.DirEntry[str]]:
         ) from error
 
 
-def _open_nested_directory(path: Path) -> list[os.DirEntry[str]] | None:
+def _open_nested_directory(
+    path: Path,
+    *,
+    strict_errors: bool = False,
+    initial_metadata: os.stat_result | None = None,
+) -> list[os.DirEntry[str]] | None:
     try:
+        if strict_errors:
+            current = path.lstat()
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or initial_metadata is None
+                or (current.st_dev, current.st_ino)
+                != (initial_metadata.st_dev, initial_metadata.st_ino)
+            ):
+                raise RepositoryFileDiscoveryError(
+                    "Repository directory changed during discovery"
+                )
         with os.scandir(path) as entries:
             return list(entries)
-    except OSError:
+    except OSError as error:
+        if strict_errors:
+            raise RepositoryFileDiscoveryError(
+                "Repository directory could not be scanned"
+            ) from error
         return None
 
 
@@ -271,6 +300,7 @@ def _inspect_regular_file(
     initial_metadata: os.stat_result,
     *,
     max_file_size_bytes: int,
+    strict_errors: bool = False,
 ) -> int | None:
     flags = os.O_RDONLY
     flags |= getattr(os, "O_BINARY", 0)
@@ -279,7 +309,11 @@ def _inspect_regular_file(
 
     try:
         descriptor = os.open(path, flags)
-    except OSError:
+    except OSError as error:
+        if strict_errors:
+            raise RepositoryFileDiscoveryError(
+                "Repository file could not be inspected"
+            ) from error
         return None
 
     inspected_size: int | None = None
@@ -289,18 +323,46 @@ def _inspect_regular_file(
             metadata.st_dev != initial_metadata.st_dev
             or metadata.st_ino != initial_metadata.st_ino
         )
-        if (
-            is_same_regular_file
-            and metadata.st_size <= max_file_size_bytes
-            and b"\x00" not in os.read(descriptor, BINARY_SNIFF_BYTES)
+        if strict_errors and (
+            not is_same_regular_file
+            or metadata.st_size != initial_metadata.st_size
+            or metadata.st_mtime_ns != initial_metadata.st_mtime_ns
+            or metadata.st_ctime_ns != initial_metadata.st_ctime_ns
         ):
-            inspected_size = metadata.st_size
-    except OSError:
+            raise RepositoryFileDiscoveryError(
+                "Repository file changed during discovery"
+            )
+        if is_same_regular_file and metadata.st_size <= max_file_size_bytes:
+            prefix = os.read(descriptor, BINARY_SNIFF_BYTES)
+            if strict_errors:
+                after = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(after.st_mode)
+                    or after.st_dev != metadata.st_dev
+                    or after.st_ino != metadata.st_ino
+                    or after.st_size != metadata.st_size
+                    or after.st_mtime_ns != metadata.st_mtime_ns
+                    or after.st_ctime_ns != metadata.st_ctime_ns
+                ):
+                    raise RepositoryFileDiscoveryError(
+                        "Repository file changed during discovery"
+                    )
+            if b"\x00" not in prefix:
+                inspected_size = metadata.st_size
+    except OSError as error:
+        if strict_errors:
+            raise RepositoryFileDiscoveryError(
+                "Repository file could not be inspected"
+            ) from error
         return None
     finally:
         try:
             os.close(descriptor)
-        except OSError:
+        except OSError as error:
+            if strict_errors:
+                raise RepositoryFileDiscoveryError(
+                    "Repository file could not be closed"
+                ) from error
             inspected_size = None
 
     return inspected_size

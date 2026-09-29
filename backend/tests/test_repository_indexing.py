@@ -171,7 +171,7 @@ def test_calls_share_indexing_savepoint_and_preserve_embeddings(
         monkeypatch.setattr(
             indexing_module,
             "discover_repository_files",
-            lambda path: list(reversed(discover(path))),
+            lambda path, **kwargs: list(reversed(discover(path, **kwargs))),
         )
     original = indexing_module.persist_call_relationships
     observed: list[int] = []
@@ -366,7 +366,7 @@ def test_missing_repository_and_wrong_dimension_fail_before_job_or_clone(
     assert clone_calls == 0
 
 
-@pytest.mark.parametrize("status", ["pending", "running", "completed"])
+@pytest.mark.parametrize("status", ["pending", "running"])
 def test_blocking_job_status_rejects_new_index_before_clone(
     status: str,
     database_session: Session,
@@ -382,10 +382,7 @@ def test_blocking_job_status_rejects_new_index_before_clone(
 
     monkeypatch.setattr(indexing_module, "clone_repository", unexpected_clone)
 
-    expected = (
-        "active indexing job" if status != "completed" else "already been indexed"
-    )
-    with pytest.raises(ValueError, match=expected):
+    with pytest.raises(ValueError, match="active indexing job"):
         _index(database_session, repository, FakeEmbeddingProvider(), tmp_path)
 
     assert (
@@ -398,7 +395,7 @@ def test_blocking_job_status_rejects_new_index_before_clone(
     )
 
 
-def test_existing_code_unit_blocks_full_reindex(
+def test_existing_unverified_code_unit_is_replaced_on_reindex(
     database_session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -418,13 +415,17 @@ def test_existing_code_unit_blocks_full_reindex(
         ],
     )
 
-    def unexpected_clone(source: object, workspace_root: Path) -> None:
-        pytest.fail("Clone must not run when CodeUnits already exist")
-
-    monkeypatch.setattr(indexing_module, "clone_repository", unexpected_clone)
-
-    with pytest.raises(ValueError, match="persisted CodeUnits"):
-        _index(database_session, repository, FakeEmbeddingProvider(), tmp_path)
+    old_ids = set(
+        database_session.scalars(select(CodeUnit.id).where(CodeUnit.file_id == file.id))
+    )
+    _install_offline_clone(monkeypatch, {file.path: b"def replacement(): pass\n"})
+    job = _index(database_session, repository, FakeEmbeddingProvider(), tmp_path)
+    units = database_session.scalars(
+        select(CodeUnit).where(CodeUnit.file_id == file.id)
+    ).all()
+    assert job.status == "completed" and file.content_hash is not None
+    assert [unit.symbol_name for unit in units] == ["replacement"]
+    assert old_ids.isdisjoint(unit.id for unit in units)
 
 
 def test_small_repository_indexes_end_to_end_in_bounded_ordered_batches(
@@ -520,8 +521,10 @@ def test_small_repository_indexes_end_to_end_in_bounded_ordered_batches(
 
     file_count = len(stored_files)
     unit_count = len(units)
-    with pytest.raises(ValueError, match="already been indexed"):
-        _index(database_session, repository, provider, workspace)
+    batches_before = list(provider.batches)
+    second_job = _index(database_session, repository, provider, workspace)
+    assert second_job.id != job.id and second_job.status == "completed"
+    assert provider.batches == batches_before
     assert (
         database_session.scalar(
             select(func.count())
@@ -544,7 +547,9 @@ def test_small_repository_indexes_end_to_end_in_bounded_ordered_batches(
 def _assert_running(session: Session, repository_id: object) -> None:
     assert (
         session.scalar(
-            select(IndexingJob.status).where(IndexingJob.repository_id == repository_id)
+            select(IndexingJob.status)
+            .where(IndexingJob.repository_id == repository_id)
+            .where(IndexingJob.status == "running")
         )
         == "running"
     )
@@ -638,8 +643,10 @@ def test_file_changed_after_discovery_fails_before_parsing(
 
     def discover_then_change(
         repository_root: Path,
+        *,
+        strict_errors: bool = False,
     ) -> list[RepositoryFileCandidate]:
-        candidates = real_discover(repository_root)
+        candidates = real_discover(repository_root, strict_errors=strict_errors)
         (repository_root / "src/changing.py").write_bytes(
             b"def after_change_with_a_different_size(): pass\n"
         )

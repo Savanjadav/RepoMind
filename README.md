@@ -120,6 +120,42 @@ dependencies. An empty result means no matching stored direct hints were found,
 not that a change is safe. `truncated=false` likewise describes only the stored
 direct results, not real-world completeness. No model calls or writes occur.
 
+### Incremental Repository Indexing
+
+Explicit calls to `index_repository()` handle both first and repeated indexing.
+Each accepted run creates a new IndexingJob. Pending/running jobs still block;
+completed/failed history remains available. Same-repository writers serialize
+through a PostgreSQL Repository row lock held until the caller's outer transaction
+ends, not merely until the service returns. Different repositories are independent.
+
+Each admitted File records SHA-256 of its exact safely read bytes. An unchanged
+path/hash preserves its File, CodeUnit identities, metadata and embeddings.
+Changed files retain their File identity but replace all units and embeddings;
+new files are indexed normally. Removed or intentionally excluded files lose their
+derived data. Renames are delete plus add, without similarity guessing. Legacy
+null hashes are unverified and refreshed on the next successful index. Empty and
+metadata-only files also receive hashes. Hashes track bytes, not parser/model
+versions; switching those does not automatically invalidate unchanged files.
+
+A changed admitted snapshot rebuilds both repository-local graphs against the
+complete current inventory, including unchanged callers/importers. This may
+reanalyze source for graph hints but never re-embeds unchanged units. An identical
+snapshot skips CodeUnit parsing, embeddings and graph rebuilding entirely, keeping
+relationship identities. Discovery and hashing still occur. Unexpected discovery
+I/O/identity failures abort rather than masquerading as deleted files. Supported
+source reread for analysis must match its classified hash.
+
+Snapshot changes share the existing savepoint: failure restores the previous
+Files, hashes, units, embeddings and edges, while the new job follows failed-job
+semantics. The caller owns commit/rollback and must commit to retain job status.
+Owned clones are cleaned on success/failure; cleanup failure also prevents a
+successful snapshot update. Repository source is never executed.
+
+Migration 0007 adds nullable `files.content_hash` with lowercase SHA-256 validation,
+without a default or backfill. No new dependency/service is required. Indexing is
+still synchronous and explicitly invoked: no watching, polling, webhooks, Git
+diff/merge-base processing, rename similarity or chunk-level incremental embeddings.
+
 ### Safe Repository Ingestion
 
 - Validation for supported HTTPS repository URLs and local-path source values.
@@ -420,8 +456,8 @@ uvicorn app.main:app --reload
 
 Existing installations must also run `alembic upgrade head` to apply migration
 0005 (file imports) and 0006 (CodeUnit call hints and endpoint ownership
-constraints). No additional service or dependency is required, and these
-migrations do not backfill relationships.
+constraints), and 0007 (nullable file content hashes). No additional service or
+dependency is required. These migrations do not backfill relationships or hashes.
 
 The API is then available at `http://127.0.0.1:8000`. The application requires
 `DATABASE_URL` for database-backed endpoints. No current API endpoint registers,

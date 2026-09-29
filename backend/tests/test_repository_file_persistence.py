@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -42,6 +42,50 @@ def _repository(session: Session, name: str = "Repository") -> Repository:
     session.add(repository)
     session.flush()
     return repository
+
+
+@pytest.mark.parametrize("digest", [None, "0" * 64, "abcdef0123456789" * 4])
+def test_content_hash_accepts_legacy_null_and_sha256(
+    database_session: Session, digest: str | None
+) -> None:
+    repo = _repository(database_session)
+    file = File(repository_id=repo.id, path="hashed.py", content_hash=digest)
+    database_session.add(file)
+    database_session.flush()
+    assert (
+        database_session.scalar(select(File.content_hash).where(File.id == file.id))
+        == digest
+    )
+
+
+@pytest.mark.parametrize("digest", ["", "a" * 63, "A" * 64, "g" * 64, "a" * 63 + "\n"])
+def test_content_hash_rejects_invalid_sha256(
+    database_session: Session, digest: str
+) -> None:
+    repo = _repository(database_session)
+    with pytest.raises(IntegrityError), database_session.begin_nested():
+        database_session.add(
+            File(repository_id=repo.id, path="bad.py", content_hash=digest)
+        )
+        database_session.flush()
+
+
+def test_content_hash_schema_preserves_file_constraints(
+    database_session: Session,
+) -> None:
+    inspector = inspect(database_session.connection())
+    column = next(
+        c for c in inspector.get_columns("files") if c["name"] == "content_hash"
+    )
+    assert str(column["type"]) == "VARCHAR(64)"
+    assert column["nullable"] is True and column["default"] is None
+    assert {c["name"] for c in inspector.get_unique_constraints("files")} == {
+        "uq_files_repository_id_id",
+        "uq_files_repository_id_path",
+    }
+    assert "ck_files_content_hash_sha256" in {
+        c["name"] for c in inspector.get_check_constraints("files")
+    }
 
 
 def _candidate(

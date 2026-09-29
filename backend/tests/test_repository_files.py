@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import NoReturn
+from unittest.mock import Mock
 
 import pytest
 
@@ -11,10 +12,16 @@ from app.repository_files import (
 )
 
 
-def _relative_paths(root: Path, **kwargs: int) -> list[str]:
+def _relative_paths(
+    root: Path,
+    *,
+    max_file_size_bytes: int = repository_files.DEFAULT_MAX_FILE_SIZE_BYTES,
+) -> list[str]:
     return [
         candidate.relative_path
-        for candidate in discover_repository_files(root, **kwargs)
+        for candidate in discover_repository_files(
+            root, max_file_size_bytes=max_file_size_bytes
+        )
     ]
 
 
@@ -328,3 +335,85 @@ def test_root_initial_scan_failure_is_fatal_and_sanitized(
 
     assert str(captured_error.value) == "Repository root cannot be scanned"
     assert "sensitive" not in str(captured_error.value)
+
+
+@pytest.mark.parametrize(
+    "operation", ["stat", "open", "read", "scan", "identity", "size"]
+)
+def test_strict_discovery_aborts_unobservable_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    path = tmp_path / "nested" / "source.py"
+    path.parent.mkdir()
+    path.write_bytes(b"def safe(): pass\n")
+
+    def fail(*args: object, **kwargs: object) -> NoReturn:
+        raise PermissionError("sensitive filesystem details")
+
+    if operation == "stat":
+        entry = Mock()
+        entry.name = "source.py"
+        entry.stat.side_effect = PermissionError("sensitive filesystem details")
+        monkeypatch.setattr(repository_files, "_open_root", lambda root: [entry])
+    elif operation == "scan":
+        real_scan = os.scandir
+
+        def scan(value: object) -> object:
+            if value == path.parent:
+                fail()
+            return real_scan(value)  # type: ignore[call-overload]
+
+        monkeypatch.setattr(os, "scandir", scan)
+    elif operation in {"identity", "size"}:
+        real_stat = os.fstat
+
+        def stat_result(fd: int) -> os.stat_result:
+            data = list(real_stat(fd))
+            data[1 if operation == "identity" else 6] += 1
+            return os.stat_result(data)
+
+        monkeypatch.setattr(os, "fstat", stat_result)
+    else:
+        monkeypatch.setattr(os, operation, fail)
+    with pytest.raises(RepositoryFileDiscoveryError) as error:
+        discover_repository_files(tmp_path, strict_errors=True)
+    assert "sensitive" not in str(error.value)
+
+
+def test_strict_discovery_keeps_intentional_exclusions(tmp_path: Path) -> None:
+    (tmp_path / "safe.py").write_bytes(b"pass\n")
+    (tmp_path / ".env").write_bytes(b"secret")
+    (tmp_path / "binary.dat").write_bytes(b"\x00")
+    (tmp_path / "large.py").write_bytes(b"x" * 21)
+    (tmp_path / "link.py").symlink_to(tmp_path / "safe.py")
+    assert [
+        c.relative_path
+        for c in discover_repository_files(
+            tmp_path, max_file_size_bytes=20, strict_errors=True
+        )
+    ] == ["safe.py"]
+
+
+def test_strict_discovery_checks_stability_before_binary_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "source.py"
+    path.write_bytes(b"pass\n")
+    real_read = os.read
+    real_stat = os.fstat
+    observations: list[str] = []
+
+    def observe(fd: int) -> os.stat_result:
+        observations.append("stat")
+        return real_stat(fd)
+
+    def mutate_during_read(fd: int, size: int) -> bytes:
+        observations.append("read")
+        path.write_bytes(b"\x00changed source\n")
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", mutate_during_read)
+    monkeypatch.setattr(os, "fstat", observe)
+    with pytest.raises(RepositoryFileDiscoveryError, match="changed during discovery"):
+        discover_repository_files(tmp_path, strict_errors=True)
+    assert observations == ["stat", "read", "stat"]

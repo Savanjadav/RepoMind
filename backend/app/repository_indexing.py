@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import stat
@@ -5,10 +6,10 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session, defer
 
-from app.code_parser import CodeParser
+from app.code_parser import CodeParser, CodeUnitKind, ParsedCodeUnit
 from app.code_relationships import (
     FileCallAnalysis,
     analyze_calls,
@@ -29,13 +30,15 @@ from app.javascript_typescript_code_parser import (
     JavaScriptCodeParser,
     TypeScriptCodeParser,
 )
+from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.indexing_job import IndexingJob
+from app.models.relationship import Relationship
 from app.models.repository import Repository
 from app.python_code_parser import PythonCodeParser
 from app.repository_clone import ClonedRepository, clone_repository
-from app.repository_file_persistence import persist_repository_files
+from app.repository_file_persistence import _validate_relative_path
 from app.repository_files import (
     RepositoryFileCandidate,
     discover_repository_files,
@@ -60,7 +63,7 @@ _CONFIGURATION_NAMES = frozenset(
         "dockerfile",
     }
 )
-_BLOCKING_JOB_STATUSES = ("completed", "pending", "running")
+_BLOCKING_JOB_STATUSES = ("pending", "running")
 
 
 class RepositoryIndexingError(RuntimeError):
@@ -74,7 +77,14 @@ def index_repository(
     embedding_provider: EmbeddingProvider,
     workspace_root: Path,
 ) -> IndexingJob:
-    repository = session.get(Repository, repository_id)
+    # Serialize snapshot writers for this repository until the CALLER ends its
+    # transaction. The service neither commits nor releases this row lock early.
+    repository = session.scalar(
+        select(Repository)
+        .where(Repository.id == repository_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if repository is None:
         raise ValueError("Repository does not exist")
     if embedding_provider.dimension != EMBEDDING_DIMENSION:
@@ -131,17 +141,6 @@ def _ensure_repository_can_be_indexed(
     )
     if blocking_status in {"pending", "running"}:
         raise ValueError("Repository already has an active indexing job")
-    if blocking_status == "completed":
-        raise ValueError("Repository has already been indexed")
-
-    existing_unit_id = session.scalar(
-        select(CodeUnit.id)
-        .join(File, CodeUnit.file_id == File.id)
-        .where(File.repository_id == repository_id)
-        .limit(1)
-    )
-    if existing_unit_id is not None:
-        raise ValueError("Repository already has persisted CodeUnits")
 
 
 def _index_cloned_repository(
@@ -151,8 +150,73 @@ def _index_cloned_repository(
     cloned_repository: ClonedRepository,
     embedding_provider: EmbeddingProvider,
 ) -> None:
-    candidates = discover_repository_files(cloned_repository.path)
-    files_by_path = _persisted_files_by_path(session, repository_id, candidates)
+    candidates = discover_repository_files(cloned_repository.path, strict_errors=True)
+    hashes: dict[str, str] = {}
+    for candidate in candidates:
+        _validate_relative_path(candidate.relative_path)
+        hashes[candidate.relative_path] = hashlib.sha256(
+            _read_candidate_bytes(candidate)
+        ).hexdigest()
+    files_by_path = {
+        file.path: file
+        for file in session.scalars(
+            select(File)
+            .where(File.repository_id == repository_id)
+            .execution_options(populate_existing=True)
+        )
+    }
+    refresh, removed = _classify_snapshot(
+        hashes, {path: file.content_hash for path, file in files_by_path.items()}
+    )
+    if not refresh and not removed:
+        return
+
+    # Reconcile the complete graph, including edges originating in unchanged files.
+    # All mutations belong to the public caller's indexing savepoint.
+    session.execute(
+        delete(CodeRelationship).where(CodeRelationship.repository_id == repository_id)
+    )
+    session.execute(
+        delete(Relationship).where(Relationship.repository_id == repository_id)
+    )
+    removed_ids = [files_by_path[path].id for path in sorted(removed)]
+    changed_ids = [
+        files_by_path[path].id for path in sorted(refresh) if path in files_by_path
+    ]
+    if removed_ids or changed_ids:
+        session.execute(
+            delete(CodeUnit).where(CodeUnit.file_id.in_(removed_ids + changed_ids))
+        )
+    if removed_ids:
+        session.execute(
+            delete(File).where(
+                File.repository_id == repository_id, File.id.in_(removed_ids)
+            )
+        )
+        for path in removed:
+            del files_by_path[path]
+    for path in sorted(refresh):
+        if path not in files_by_path:
+            file = File(repository_id=repository_id, path=path)
+            session.add(file)
+            files_by_path[path] = file
+    session.flush()
+
+    unchanged_units: dict[UUID, list[CodeUnit]] = {}
+    for unit in session.scalars(
+        select(CodeUnit)
+        .join(File, CodeUnit.file_id == File.id)
+        .where(File.repository_id == repository_id)
+        .options(defer(CodeUnit.embedding, raiseload=True))
+        .order_by(
+            CodeUnit.file_id,
+            CodeUnit.start_line,
+            CodeUnit.end_line.desc(),
+            CodeUnit.kind,
+            CodeUnit.id,
+        )
+    ):
+        unchanged_units.setdefault(unit.file_id, []).append(unit)
     parsers: dict[str, CodeParser] = {
         "configuration": ConfigurationTextParser(),
         "documentation": DocumentationTextParser(),
@@ -165,32 +229,49 @@ def _index_cloned_repository(
     call_analyses: list[FileCallAnalysis] = []
 
     for candidate in candidates:
-        parser = _parser_for_path(candidate.relative_path, parsers)
+        path = candidate.relative_path
+        file = files_by_path[path]
+        parser = _parser_for_path(path, parsers)
         if parser is None:
+            file.content_hash = hashes[path]
             continue
 
-        content = _read_utf8_candidate(candidate)
-        parsed_units = parser.parse(
-            content=content,
-            relative_path=candidate.relative_path,
-        )
-        if not parsed_units:
-            continue
-
-        file = files_by_path.get(candidate.relative_path)
-        if file is None:
-            raise RepositoryIndexingError("Persisted repository file is missing")
-        stored_units = persist_code_units(session, file.id, parsed_units)
-        embedding_batch.extend(stored_units)
+        content_bytes = _read_candidate_bytes(candidate)
+        if hashlib.sha256(content_bytes).hexdigest() != hashes[path]:
+            raise RepositoryIndexingError("Repository file changed during indexing")
+        content = _decode_utf8(content_bytes)
+        if path in refresh:
+            parsed_units = parser.parse(content=content, relative_path=path)
+            stored_units = persist_code_units(session, file.id, parsed_units)
+            embedding_batch.extend(stored_units)
+        else:
+            stored_units = unchanged_units.get(file.id, [])
+            # Import extraction consumes ParsedCodeUnits, but reused units are
+            # reconstructed from persisted metadata, not reparsed or reinserted.
+            parsed_units = [
+                ParsedCodeUnit(
+                    kind=CodeUnitKind(unit.kind),
+                    content=unit.content,
+                    relative_path=path,
+                    language=unit.language,
+                    start_line=unit.start_line,
+                    end_line=unit.end_line,
+                    symbol_name=unit.symbol_name,
+                )
+                for unit in stored_units
+                if unit.kind == CodeUnitKind.IMPORT.value
+            ]
+        file.content_hash = hashes[path]
         imports.extend(extract_imports(parsed_units))
-        call_analyses.append(
-            analyze_calls(
-                content=content,
-                file=file,
-                language=parsed_units[0].language,
-                units=stored_units,
+        if stored_units:
+            call_analyses.append(
+                analyze_calls(
+                    content=content,
+                    file=file,
+                    language=stored_units[0].language,
+                    units=stored_units,
+                )
             )
-        )
 
         while len(embedding_batch) >= EMBEDDING_BATCH_SIZE:
             batch = embedding_batch[:EMBEDDING_BATCH_SIZE]
@@ -213,30 +294,14 @@ def _index_cloned_repository(
     )
 
 
-def _persisted_files_by_path(
-    session: Session,
-    repository_id: UUID,
-    candidates: Sequence[RepositoryFileCandidate],
-) -> dict[str, File]:
-    inserted_files = persist_repository_files(session, repository_id, candidates)
-    files_by_path = {file.path: file for file in inserted_files}
-    missing_paths = [
-        candidate.relative_path
-        for candidate in candidates
-        if candidate.relative_path not in files_by_path
-    ]
-    if missing_paths:
-        existing_files = session.scalars(
-            select(File).where(
-                File.repository_id == repository_id,
-                File.path.in_(missing_paths),
-            )
-        ).all()
-        files_by_path.update({file.path: file for file in existing_files})
-
-    if len(files_by_path) != len(candidates):
-        raise RepositoryIndexingError("Repository file metadata could not be persisted")
-    return files_by_path
+def _classify_snapshot(
+    hashes: dict[str, str], persisted: dict[str, str | None]
+) -> tuple[set[str], set[str]]:
+    """Return new/changed/unverified paths and removed paths, without rename guesses."""
+    return (
+        {path for path, digest in hashes.items() if persisted.get(path) != digest},
+        set(persisted) - set(hashes),
+    )
 
 
 def _parser_for_path(
@@ -262,7 +327,7 @@ def _parser_for_path(
     return None
 
 
-def _read_utf8_candidate(candidate: RepositoryFileCandidate) -> str:
+def _read_candidate_bytes(candidate: RepositoryFileCandidate) -> bytes:
     flags = os.O_RDONLY
     flags |= getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -280,11 +345,22 @@ def _read_utf8_candidate(candidate: RepositoryFileCandidate) -> str:
             content_bytes = file.read(candidate.size_bytes + 1)
             if len(content_bytes) != candidate.size_bytes:
                 raise RepositoryIndexingError("Repository file changed during indexing")
+            after = os.fstat(file.fileno())
+            if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            ):
+                raise RepositoryIndexingError("Repository file changed during indexing")
     except RepositoryIndexingError:
         raise
     except OSError as error:
         raise RepositoryIndexingError("Repository file could not be read") from error
 
+    return content_bytes
+
+
+def _decode_utf8(content_bytes: bytes) -> str:
     try:
         return content_bytes.decode("utf-8")
     except UnicodeDecodeError as error:
