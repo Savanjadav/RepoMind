@@ -43,7 +43,7 @@ from app.repository_files import (
     RepositoryFileCandidate,
     discover_repository_files,
 )
-from app.repository_source import validate_repository_source
+from app.repository_source import ValidatedRepositorySource, validate_repository_source
 from app.text_code_parser import ConfigurationTextParser, DocumentationTextParser
 
 EMBEDDING_BATCH_SIZE = 64
@@ -99,13 +99,67 @@ def index_repository(
     job.status = "running"
     session.flush()
 
+    return _execute_indexing_job(
+        session,
+        repository=repository,
+        job=job,
+        source=source,
+        embedding_provider=embedding_provider,
+        workspace_root=workspace_root,
+    )
+
+
+def execute_reserved_indexing_job(
+    session: Session,
+    *,
+    repository_id: UUID,
+    job_id: UUID,
+    embedding_provider: EmbeddingProvider,
+    workspace_root: Path,
+) -> IndexingJob:
+    """Execute an already-claimed job; the runner owns the outer transaction."""
+    repository = session.scalar(
+        select(Repository)
+        .where(Repository.id == repository_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    job = session.scalar(
+        select(IndexingJob)
+        .where(IndexingJob.id == job_id, IndexingJob.repository_id == repository_id)
+        .execution_options(populate_existing=True)
+    )
+    if repository is None or job is None or job.status != "running":
+        raise ValueError("Reserved indexing job is not running for this repository")
+    if embedding_provider.dimension != EMBEDDING_DIMENSION:
+        raise ValueError("Embedding provider dimension does not match storage")
+    return _execute_indexing_job(
+        session,
+        repository=repository,
+        job=job,
+        source=validate_repository_source(repository.source),
+        embedding_provider=embedding_provider,
+        workspace_root=workspace_root,
+    )
+
+
+def _execute_indexing_job(
+    session: Session,
+    *,
+    repository: Repository,
+    job: IndexingJob,
+    source: ValidatedRepositorySource,
+    embedding_provider: EmbeddingProvider,
+    workspace_root: Path,
+) -> IndexingJob:
+
     try:
         with session.begin_nested():
             cloned_repository = clone_repository(source, workspace_root)
             try:
                 _index_cloned_repository(
                     session=session,
-                    repository_id=repository_id,
+                    repository_id=repository.id,
                     cloned_repository=cloned_repository,
                     embedding_provider=embedding_provider,
                 )

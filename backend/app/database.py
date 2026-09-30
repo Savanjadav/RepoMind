@@ -27,3 +27,8 @@ def _get_application_session_factory() -> sessionmaker[Session]:
 def get_db_session() -> Iterator[Session]:
     with _get_application_session_factory()() as session:
         yield session
+
+
+def get_application_session_factory() -> sessionmaker[Session]:
+    """Return the shared factory, never a request-owned Session."""
+    return _get_application_session_factory()

@@ -153,8 +153,32 @@ successful snapshot update. Repository source is never executed.
 
 Migration 0007 adds nullable `files.content_hash` with lowercase SHA-256 validation,
 without a default or backfill. No new dependency/service is required. Indexing is
-still synchronous and explicitly invoked: no watching, polling, webhooks, Git
+still explicitly invoked: no source watching, source polling, webhooks, Git
 diff/merge-base processing, rename similarity or chunk-level incremental embeddings.
+
+### Background Indexing Jobs
+
+For an existing Repository, `POST /repositories/{repository_id}/index` reserves
+one pending job and returns HTTP 202 with `job_id`, `repository_id`, and
+`status: "pending"`. Its `Location` header points to
+`GET /repositories/{repository_id}/indexing-jobs/{job_id}`. Poll that metadata-only
+resource for coarse persisted status: `pending`, `running`, `completed`, or
+`failed`. Missing resources return 404; active indexing or a busy repository
+returns 409. No repository registration endpoint is added.
+
+The synchronous runner executes through Starlette BackgroundTasks' thread pool
+after the response body is sent. It creates independent database Sessions,
+commits the running claim before indexing, and uses the same incremental pipeline
+described above. Failed indexing preserves the previous snapshot; the runner
+persists failed status when the database remains available. Direct synchronous
+`index_repository()` callers still own their outer transaction.
+
+Execution is in-process and non-durable. Abrupt termination can leave pending or
+running jobs (which block another request) and temporary workspaces. There is no
+automatic stale-job/restart recovery, retry, exactly-once delivery, durable queue,
+or Redis integration. Thread-pool, database, and model resources are shared process
+limits; background model batches are serialized without globally locking entire
+indexing jobs. Day 42 does not promise a durable queue.
 
 ### Safe Repository Ingestion
 
@@ -460,9 +484,9 @@ constraints), and 0007 (nullable file content hashes). No additional service or
 dependency is required. These migrations do not backfill relationships or hashes.
 
 The API is then available at `http://127.0.0.1:8000`. The application requires
-`DATABASE_URL` for database-backed endpoints. No current API endpoint registers,
-clones, or indexes a repository end to end; the code-unit browser operates on
-already-persisted database state.
+`DATABASE_URL` for database-backed endpoints. Repositories must already exist in
+the database: the indexing endpoint schedules their ingestion but does not
+register them. The code-unit browser operates on persisted database state.
 
 ## Current API
 

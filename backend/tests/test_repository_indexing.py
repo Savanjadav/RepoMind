@@ -77,6 +77,33 @@ def _use_provider(provider: EmbeddingProvider) -> EmbeddingProvider:
     return provider
 
 
+@pytest.mark.parametrize("status", ["pending", "completed", "failed"])
+def test_reserved_execution_rejects_unclaimed_job(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    repository = _repository(database_session)
+    job = IndexingJob(repository_id=repository.id, status=status)
+    database_session.add(job)
+    database_session.flush()
+    monkeypatch.setattr(
+        indexing_module,
+        "clone_repository",
+        lambda *args: pytest.fail("Unclaimed job must not clone"),
+    )
+    with pytest.raises(ValueError, match="not running"):
+        indexing_module.execute_reserved_indexing_job(
+            database_session,
+            repository_id=repository.id,
+            job_id=job.id,
+            embedding_provider=FakeEmbeddingProvider(),
+            workspace_root=tmp_path,
+        )
+    assert job.status == status
+
+
 @pytest.mark.parametrize("fail_relationships", [False, True])
 def test_import_relationships_share_indexing_transaction(
     database_session: Session,
