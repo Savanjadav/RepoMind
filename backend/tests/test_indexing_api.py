@@ -2,10 +2,13 @@ import asyncio
 import os
 from collections.abc import Iterator, MutableMapping
 from typing import Any
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from redis import Redis
+from redis.exceptions import ConnectionError, TimeoutError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -16,6 +19,7 @@ from app.database import create_database_engine, create_session_factory
 from app.main import app
 from app.models.indexing_job import IndexingJob
 from app.models.repository import Repository
+from app.redis_cache import RedisCache, get_redis_cache
 
 
 @pytest.fixture
@@ -34,6 +38,7 @@ def database(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Any, UUID, list[
         )
         session.commit()
     calls: list[UUID] = []
+    app.dependency_overrides[get_redis_cache] = lambda: None
 
     def runner(job_id: UUID) -> None:
         assert isinstance(job_id, UUID)
@@ -298,4 +303,60 @@ def test_status_is_read_only(
             client.get(f"/repositories/{rid}/indexing-jobs/{job_id}").status_code == 200
         )
     assert calls == []
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize("mode", ["held", "acquired", "outage", "release_failure"])
+def test_advisory_reservation_lease(
+    database: tuple[Any, UUID, list[UUID]], monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    factory, rid, calls = database
+    client = Mock(spec=Redis)
+    client.set.return_value = None if mode == "held" else True
+    if mode == "outage":
+        client.set.side_effect = ConnectionError("SECRET")
+    if mode == "release_failure":
+        client.eval.side_effect = TimeoutError("SECRET")
+    cache = RedisCache(client)
+    app.dependency_overrides[get_redis_cache] = lambda: cache
+
+    def runner(job_id: UUID) -> None:
+        if mode in {"acquired", "release_failure"}:
+            assert client.eval.call_count == 1  # Released before dispatch.
+        calls.append(job_id)
+
+    monkeypatch.setattr(api, "run_indexing_job", runner)
+    with TestClient(app) as http:
+        response = http.post(f"/repositories/{rid}/index")
+        assert response.status_code == (409 if mode == "held" else 202)
+        if mode != "held":
+            assert len(calls) == 1
+            # Simulate expiry/reacquisition: Redis allows, PostgreSQL still blocks.
+            assert http.post(f"/repositories/{rid}/index").status_code == 409
+            assert len(calls) == 1
+    with factory() as session:
+        jobs_for_repo = list(
+            session.scalars(
+                select(IndexingJob.id).where(IndexingJob.repository_id == rid)
+            )
+        )
+    assert len(jobs_for_repo) == (0 if mode == "held" else 1)
+
+
+def test_failed_commit_releases_lease_without_dispatch(
+    database: tuple[Any, UUID, list[UUID]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, rid, calls = database
+    client = Mock(spec=Redis)
+    client.set.return_value = True
+    app.dependency_overrides[get_redis_cache] = lambda: RedisCache(client)
+
+    def fail(session: Session) -> None:
+        raise RuntimeError("commit failure")
+
+    monkeypatch.setattr(Session, "commit", fail)
+    with TestClient(app, raise_server_exceptions=False) as http:
+        assert http.post(f"/repositories/{rid}/index").status_code == 500
+    assert calls == []
+    assert client.eval.call_count == 1
     monkeypatch.undo()

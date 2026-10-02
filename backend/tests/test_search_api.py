@@ -2,13 +2,17 @@ import os
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from math import sqrt
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from redis import Redis
+from redis.exceptions import ConnectionError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import search_api
 from app.code_parser import CodeUnitKind
 from app.database import create_database_engine, get_db_session
 from app.embedding_provider import EmbeddingProvider
@@ -16,7 +20,8 @@ from app.main import app
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
 from app.models.repository import Repository
-from app.search_api import get_embedding_provider
+from app.redis_cache import RedisCache, get_redis_cache, search_key
+from app.search_api import get_search_provider_factory
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -75,9 +80,10 @@ def api_context() -> Iterator[ApiTestContext]:
                     return provider
 
                 app.dependency_overrides[get_db_session] = override_db_session
-                app.dependency_overrides[get_embedding_provider] = (
+                app.dependency_overrides[get_search_provider_factory] = lambda: (
                     override_embedding_provider
                 )
+                app.dependency_overrides[get_redis_cache] = lambda: None
                 with TestClient(app, raise_server_exceptions=False) as client:
                     yield ApiTestContext(client, session, provider)
         finally:
@@ -361,3 +367,154 @@ def test_provider_runtime_failure_is_server_error(
 
 def test_fake_provider_structurally_satisfies_contract() -> None:
     assert _use_provider(FakeEmbeddingProvider()).dimension == EMBEDDING_DIMENSION
+
+
+def _memory_cache() -> tuple[RedisCache, Mock, dict[str, bytes]]:
+    values: dict[str, bytes] = {}
+    client = Mock(spec=Redis)
+    client.get.side_effect = values.get
+    client.set.side_effect = lambda key, value, **kwargs: values.__setitem__(key, value)
+    return RedisCache(client), client, values
+
+
+def test_cache_hit_avoids_provider_acquisition_and_retrieval(
+    api_context: ApiTestContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(api_context.session)
+    file = _file(api_context.session, repository, "auth.py")
+    _code_unit(api_context.session, file, embedding=_vector(1.0, 0.0))
+    cache, _, values = _memory_cache()
+    app.dependency_overrides[get_redis_cache] = lambda: cache
+    first = _search(api_context, repository.id)
+    assert first.status_code == 200 and first.json()["items"]
+    assert len(values) == 1
+
+    def forbidden() -> FakeEmbeddingProvider:
+        pytest.fail("A cache hit must not acquire the provider or retrieve")
+
+    app.dependency_overrides[get_search_provider_factory] = lambda: forbidden
+    monkeypatch.setattr(search_api, "search_code_units_semantically", forbidden)
+    second = _search(api_context, repository.id)
+    assert second.json() == first.json()
+    assert len(api_context.provider.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "failure", ["unavailable", "malformed", "oversize", "search_error"]
+)
+def test_cache_failure_and_search_failure_behavior(
+    api_context: ApiTestContext, failure: str
+) -> None:
+    repository = _repository(api_context.session)
+    cache, client, values = _memory_cache()
+    if failure == "unavailable":
+        client.get.side_effect = ConnectionError("SECRET")
+        client.set.side_effect = ConnectionError("SECRET")
+    elif failure in {"malformed", "oversize"}:
+        client.get.side_effect = None
+        client.get.return_value = (
+            b"bad" if failure == "malformed" else b"x" * (512 * 1024 + 1)
+        )
+    else:
+        api_context.provider.failure = RuntimeError("failure")
+    app.dependency_overrides[get_redis_cache] = lambda: cache
+    response = _search(api_context, repository.id)
+    assert response.status_code == (500 if failure == "search_error" else 200)
+    assert len(api_context.provider.calls) == 1
+    if failure == "search_error":
+        assert not values
+        client.set.assert_not_called()
+
+
+def test_generation_change_and_deleted_repository_cannot_hit(
+    api_context: ApiTestContext,
+) -> None:
+    repository = _repository(api_context.session)
+    cache, _, values = _memory_cache()
+    app.dependency_overrides[get_redis_cache] = lambda: cache
+    assert _search(api_context, repository.id).status_code == 200
+    repository.index_generation += 1
+    api_context.session.flush()
+    assert _search(api_context, repository.id).status_code == 200
+    assert len(api_context.provider.calls) == 2 and len(values) == 2
+    rid = repository.id
+    api_context.session.delete(repository)
+    api_context.session.flush()
+    assert _search(api_context, rid).status_code == 404
+    assert len(api_context.provider.calls) == 2
+
+
+@pytest.mark.parametrize("phase", ["hit", "compute"])
+def test_committed_generation_race_uses_fresh_scalar_reads(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    if DATABASE_URL is None:
+        pytest.skip("DATABASE_URL is not configured")
+    from sqlalchemy import delete, update
+
+    from app.database import create_session_factory
+
+    engine = create_database_engine(DATABASE_URL)
+    factory = create_session_factory(engine)
+    rid = uuid4()
+    with factory() as session:
+        session.add(
+            Repository(id=rid, name="race", source=f"https://example.com/{rid}")
+        )
+        session.commit()
+    cache, client, values = _memory_cache()
+    query = "race"
+    key = search_key(rid, 0, query, 10)
+    if phase == "hit":
+        cache.write(key, {"items": [], "limit": 10})
+    provider = FakeEmbeddingProvider()
+
+    def advance() -> None:
+        with factory() as writer:
+            writer.execute(
+                update(Repository)
+                .where(Repository.id == rid)
+                .values(index_generation=1)
+            )
+            writer.commit()
+
+    if phase == "hit":
+
+        def read(key: str) -> bytes | None:
+            advance()
+            return values.get(key)
+
+        client.get.side_effect = read
+    else:
+        original = provider.embed
+
+        def embed(texts: Sequence[str]) -> list[list[float]]:
+            advance()
+            return original(texts)
+
+        monkeypatch.setattr(provider, "embed", embed)
+    try:
+        with factory() as reader:
+            stale = reader.get(Repository, rid)
+            assert stale is not None and stale.index_generation == 0
+            response = search_api.search(
+                repository_id=rid,
+                q=query,
+                session=reader,
+                provider_factory=lambda: provider,
+                cache=cache,
+                limit=10,
+            )
+            assert response.items == []
+            assert stale.index_generation == 0
+            assert search_api._generation(reader, rid) == 1
+        assert len(provider.calls) == 1
+        if phase == "compute":
+            assert not values
+        else:
+            assert search_key(rid, 1, query, 10) in values
+    finally:
+        with factory() as cleanup:
+            cleanup.execute(delete(Repository).where(Repository.id == rid))
+            cleanup.commit()
+        engine.dispose()

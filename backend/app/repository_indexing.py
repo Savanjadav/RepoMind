@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, defer
 
 from app.code_parser import CodeParser, CodeUnitKind, ParsedCodeUnit
@@ -345,6 +345,13 @@ def _index_cloned_repository(
         repository_id=repository_id,
         files_by_path=files_by_path,
         analyses=call_analyses,
+    )
+    # The public lifecycle holds the repository lock and snapshot savepoint.
+    # No-change runs returned above; cleanup/outer rollback also undo this bump.
+    session.execute(
+        update(Repository)
+        .where(Repository.id == repository_id)
+        .values(index_generation=Repository.index_generation + 1)
     )
 
 

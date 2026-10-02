@@ -176,9 +176,46 @@ persists failed status when the database remains available. Direct synchronous
 Execution is in-process and non-durable. Abrupt termination can leave pending or
 running jobs (which block another request) and temporary workspaces. There is no
 automatic stale-job/restart recovery, retry, exactly-once delivery, durable queue,
-or Redis integration. Thread-pool, database, and model resources are shared process
+or Redis-backed execution. Thread-pool, database, and model resources are shared process
 limits; background model batches are serialized without globally locking entire
-indexing jobs. Day 42 does not promise a durable queue.
+indexing jobs. The advisory Redis reservation lease below is not a durable queue.
+
+### Optional Redis Search Cache
+
+Redis accelerates successful `/search` responses only; `/ask`, intermediate
+retrieval/RAG results, and job-status reads are not cached. PostgreSQL remains
+authoritative for repositories, source units, embeddings, graphs and jobs.
+Omit `REDIS_URL` to disable Redis. Redis connection/command failures fall back to
+the normal PostgreSQL/model path; cached-value corruption is a miss.
+
+Migration 0008 adds nonnegative `Repository.index_generation`, initially zero
+for existing and new repositories. A changed indexed snapshot advances it once
+inside the same transaction; no-change reindexing preserves it, and failure or
+caller rollback restores it with the snapshot. Versioned keys include repository
+UUID, generation and a SHA-256 fingerprint of the exact query, limit and fixed
+embedding configuration. Readers check generation with fresh SQL before using a
+hit and after computing a miss. A concurrent change prevents caching that result.
+Overlapping requests may still return the coherent snapshot they observed before
+a concurrent commit; this is not a wall-clock freshness guarantee.
+
+Entries contain validated JSON response DTOs, expire after 300 seconds and are
+limited to 512 KiB. Old generations expire without key scans or bulk deletion.
+Hits avoid provider acquisition, embedding and retrieval. Large responses remain
+uncached, and concurrent cold misses may duplicate work; there is no single-flight
+mechanism. Keys hash queries, but cached values still contain source content:
+keep Redis private and do not treat hashing as encryption.
+
+A separate repository-specific five-second Redis lease covers POST indexing
+reservation only. Atomic random-token ownership/release prevents deleting another
+owner's lease. It is advisory: PostgreSQL row locks and persisted active-job checks
+remain authoritative during expiry, eviction and Redis outages. No lease is held
+for background execution; Redis does not provide job recovery or durable delivery.
+
+Direct administrative changes to indexed units/embeddings/graphs must also advance
+generation. Model/parser revisions are not detected from file hashes; changing
+search model artifacts or semantics requires a cache schema-version bump. After
+restoring PostgreSQL independently of Redis, use a fresh application cache
+namespace. No automatic cache support for arbitrary database edits is provided.
 
 ### Safe Repository Ingestion
 
@@ -432,11 +469,11 @@ generated text.
 - Sentence Transformers
 - Ollama
 - Docker Compose
+- Optional Redis search caching and advisory indexing-reservation leases
 - pytest, Ruff, and Mypy
 
 ### Planned for v0.1.0
 
-- Redis
 - Next.js and React
 - GitHub Actions
 - Prometheus and Grafana
@@ -481,7 +518,23 @@ uvicorn app.main:app --reload
 Existing installations must also run `alembic upgrade head` to apply migration
 0005 (file imports) and 0006 (CodeUnit call hints and endpoint ownership
 constraints), and 0007 (nullable file content hashes). No additional service or
-dependency is required. These migrations do not backfill relationships or hashes.
+dependency is required by those migrations. Migration 0008 adds repository cache
+generations; it initializes them to zero without indexing or rebuilding data.
+These migrations do not backfill relationships or hashes.
+
+To enable the optional cache for the host-run backend:
+
+```bash
+docker compose up -d redis
+export REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+The pinned Redis service binds only to loopback, has a healthcheck, and uses no
+persistence volume, RDB snapshot or AOF. Its 128 MiB cache uses `allkeys-lru`
+eviction; even an evicted reservation lease does not bypass PostgreSQL checks.
+Unset `REDIS_URL` to disable it. Never expose this unauthenticated development
+service publicly. The Python Redis client is a backend dependency; optional refers
+to the running service, not whether its client package is installed.
 
 The API is then available at `http://127.0.0.1:8000`. The application requires
 `DATABASE_URL` for database-backed endpoints. Repositories must already exist in

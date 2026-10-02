@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Iterator
+from contextlib import nullcontext
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -20,6 +21,7 @@ from app.indexing_jobs import (
     run_indexing_job,
 )
 from app.models.indexing_job import IndexingJob
+from app.redis_cache import RedisCache, get_redis_cache
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -75,7 +77,23 @@ def get_indexing_session() -> Iterator[Session]:
 def start_indexing(
     repository_id: UUID,
     session: Annotated[Session, Depends(get_indexing_session)],
+    cache: Annotated[RedisCache | None, Depends(get_redis_cache)],
 ) -> JSONResponse:
+    # Only the short reservation transaction gets an advisory lease. PostgreSQL
+    # remains authoritative after expiry, eviction, or a Redis outage.
+    with (
+        cache.reservation(repository_id)
+        if cache is not None
+        else nullcontext(True) as allowed
+    ):
+        if not allowed:
+            raise HTTPException(
+                409, "Repository already has active indexing or is busy"
+            )
+        return _reserve_response(repository_id, session)
+
+
+def _reserve_response(repository_id: UUID, session: Session) -> JSONResponse:
     try:
         job = reserve_indexing_job(session, repository_id)
         body = IndexingJobResponse(

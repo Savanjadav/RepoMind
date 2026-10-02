@@ -9,9 +9,11 @@ from tempfile import TemporaryDirectory
 from threading import Barrier
 from types import ModuleType
 from typing import Any
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
+from redis import Redis
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
@@ -24,7 +26,9 @@ from app.models.file import File
 from app.models.indexing_job import IndexingJob
 from app.models.relationship import Relationship
 from app.models.repository import Repository
+from app.redis_cache import RedisCache
 from app.repository_clone import ClonedRepository
+from app.search_api import search
 
 
 class FakeProvider:
@@ -62,6 +66,12 @@ class State:
         with self.factory() as session:
             return session.scalar(
                 select(IndexingJob.status).where(IndexingJob.id == job_id)
+            )
+
+    def generation(self) -> int | None:
+        with self.factory() as session:
+            return session.scalar(
+                select(Repository.index_generation).where(Repository.id == self.ids[0])
             )
 
 
@@ -194,10 +204,12 @@ def test_reservation_lock_and_commit_visibility(state: State) -> None:
 
 
 def test_runner_uses_exact_job_and_commits_visible_running(state: State) -> None:
+    assert state.generation() == 0
     job_id = state.reserve()
     jobs.run_indexing_job(job_id)
     assert state.observed == ["running"]
     assert state.status(job_id) == "completed"
+    assert state.generation() == 1
     before = snapshot(state)
     assert all(before.values())
     assert state.provider.calls
@@ -214,6 +226,7 @@ def test_runner_uses_exact_job_and_commits_visible_running(state: State) -> None
     jobs.run_indexing_job(state.reserve())
     assert state.provider.calls == []
     assert snapshot(state) == before
+    assert state.generation() == 1
 
 
 @pytest.mark.parametrize("status", ["running", "completed", "failed", "missing"])
@@ -322,6 +335,7 @@ def test_background_failure_preserves_snapshot(
     assert state.status(first) == "completed"
     assert state.status(second) == "failed"
     assert snapshot(state) == before
+    assert state.generation() == 1
     assert "SECRET" not in caplog.text and "PRIVATE SOURCE" not in caplog.text
 
 
@@ -478,4 +492,78 @@ def test_committed_completion_survives_ambiguous_commit_error(
     jobs.run_indexing_job(job_id)
     assert state.status(job_id) == "completed"
     assert all(snapshot(state).values())
+    assert state.generation() == 1
     monkeypatch.undo()
+
+
+def test_cache_survives_no_change_and_failure_but_not_changed_commit(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values: dict[str, bytes] = {}
+    client = Mock(spec=Redis)
+    client.get.side_effect = values.get
+    client.set.side_effect = lambda key, value, **kwargs: values.__setitem__(key, value)
+    cache = RedisCache(client)
+    jobs.run_indexing_job(state.reserve())
+
+    def query() -> Any:
+        with state.factory() as session:
+            return search(
+                repository_id=state.ids[0],
+                q="helper",
+                session=session,
+                provider_factory=lambda: state.provider,
+                cache=cache,
+                limit=10,
+            )
+
+    first = query()
+    assert first.items and len(values) == 1
+    jobs.run_indexing_job(state.reserve())
+    state.provider.calls.clear()
+    assert query() == first
+    assert state.provider.calls == []
+    state.files["service.py"] = b"def helper(): return 42\n"
+    original = state.provider.embed
+
+    def fail(texts: Sequence[str]) -> list[list[float]]:
+        raise RuntimeError("embedding failure")
+
+    monkeypatch.setattr(state.provider, "embed", fail)
+    failed = state.reserve()
+    jobs.run_indexing_job(failed)
+    assert state.status(failed) == "failed" and state.generation() == 1
+    assert query() == first  # Cached response never touches the failing provider.
+    monkeypatch.setattr(state.provider, "embed", original)
+    jobs.run_indexing_job(state.reserve())
+    assert state.generation() == 2
+    state.provider.calls.clear()
+    latest = query()
+    assert state.provider.calls == [("helper",)]
+    assert any("42" in item.content for item in latest.items)
+    assert len(values) == 2
+
+
+def test_generation_and_snapshot_become_visible_together_after_cleanup(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs.run_indexing_job(state.reserve())
+    old_snapshot = snapshot(state)
+    assert all(old_snapshot.values()) and state.generation() == 1
+    state.files["service.py"] = b"def helper(): return 42\n"
+    original = indexing._remove_owned_clone
+    observed: list[int | None] = []
+
+    def cleanup(path: Path, workspace: Path) -> None:
+        # The writer has flushed its new snapshot/generation by this point.
+        # Independent connections must still observe the last committed pair.
+        observed.append(state.generation())
+        assert snapshot(state) == old_snapshot
+        original(path, workspace)
+
+    monkeypatch.setattr(indexing, "_remove_owned_clone", cleanup)
+    job = state.reserve()
+    jobs.run_indexing_job(job)
+    assert observed == [1]
+    assert state.status(job) == "completed" and state.generation() == 2
+    assert snapshot(state) != old_snapshot

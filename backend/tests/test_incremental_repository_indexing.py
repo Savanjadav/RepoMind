@@ -181,6 +181,7 @@ def test_identical_second_run_preserves_entire_snapshot_without_work(
 ) -> None:
     first = fixture.run()
     before = _snapshot(fixture.session, fixture.repository.id)
+    assert fixture.repository.index_generation == 1
     assert (
         before["code_units"]
         and before["relationships"]
@@ -215,6 +216,7 @@ def test_identical_second_run_preserves_entire_snapshot_without_work(
     assert first.id != second.id and first.status == second.status == "completed"
     assert _snapshot(fixture.session, fixture.repository.id) == before
     assert fixture.provider.batches == batches
+    assert fixture.repository.index_generation == 1
     assert len(fixture.clones) == 2 and all(
         not path.exists() for path in fixture.clones
     )
@@ -413,6 +415,14 @@ def test_failure_preserves_previous_snapshot(
     with pytest.raises((RuntimeError, indexing.RepositoryIndexingError)):
         fixture.run()
     assert _snapshot(fixture.session, fixture.repository.id) == before
+    assert (
+        fixture.session.scalar(
+            select(Repository.index_generation).where(
+                Repository.id == fixture.repository.id
+            )
+        )
+        == 1
+    )
     jobs = fixture.session.scalars(
         select(IndexingJob).where(IndexingJob.repository_id == fixture.repository.id)
     ).all()
@@ -422,6 +432,52 @@ def test_failure_preserves_previous_snapshot(
         all(not path.exists() for path in fixture.clones)
         if phase != "cleanup"
         else fixture.clones[-1].exists()
+    )
+
+
+@pytest.mark.parametrize("change", ["changed", "deleted", "legacy", "added"])
+def test_generation_advances_once_per_changed_snapshot(
+    fixture: IndexingFixture, change: str
+) -> None:
+    fixture.run()
+    assert fixture.repository.index_generation == 1
+    if change == "changed":
+        fixture.files["service.py"] = b"def helper(): return 2\n"
+    elif change == "deleted":
+        fixture.files.clear()
+    elif change == "added":
+        fixture.files["new.py"] = b"def new(): pass\n"
+    else:
+        file = fixture.session.scalar(
+            select(File).where(File.repository_id == fixture.repository.id)
+        )
+        assert file is not None
+        file.content_hash = None
+        fixture.session.flush()
+    fixture.run()
+    assert fixture.repository.index_generation == 2
+    fixture.run()
+    assert fixture.repository.index_generation == 2
+
+
+def test_empty_to_empty_generation_and_caller_rollback(
+    fixture: IndexingFixture,
+) -> None:
+    fixture.files.clear()
+    fixture.run()
+    assert fixture.repository.index_generation == 0
+    outer = fixture.session.begin_nested()
+    fixture.files["one.py"] = b"def one(): pass\n"
+    fixture.run()
+    assert fixture.repository.index_generation == 1
+    outer.rollback()
+    assert (
+        fixture.session.scalar(
+            select(Repository.index_generation).where(
+                Repository.id == fixture.repository.id
+            )
+        )
+        == 0
     )
 
 

@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:8.2.2-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    tmpfs:
+      - /data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   database:
     image: pgvector/pgvector:0.8.6-pg17-trixie
     environment:

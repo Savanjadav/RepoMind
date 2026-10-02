@@ -2,7 +2,8 @@ import os
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import create_database_engine
@@ -37,6 +38,7 @@ def test_repository_can_be_persisted_and_queried() -> None:
                 assert stored_repository is not None
                 assert stored_repository.name == repository.name
                 assert stored_repository.source == repository.source
+                assert stored_repository.index_generation == 0
                 assert stored_repository.created_at is not None
         finally:
             transaction.rollback()
@@ -44,6 +46,35 @@ def test_repository_can_be_persisted_and_queried() -> None:
     with Session(engine) as session:
         assert session.get(Repository, repository_id) is None
 
+    engine.dispose()
+
+
+@pytest.mark.skipif(DATABASE_URL is None, reason="DATABASE_URL is not configured")
+def test_generation_is_nonnegative_and_has_database_default() -> None:
+    engine = create_database_engine(DATABASE_URL)
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            rid = uuid4()
+            row = connection.execute(
+                text(
+                    "INSERT INTO repositories (id, name, source) "
+                    "VALUES (:id, 'test', :source) RETURNING index_generation"
+                ),
+                {"id": rid, "source": f"https://example.com/{rid}"},
+            ).scalar_one()
+            assert row == 0
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text(
+                            "UPDATE repositories SET index_generation = -1 "
+                            "WHERE id = :id"
+                        ),
+                        {"id": rid},
+                    )
+        finally:
+            transaction.rollback()
     engine.dispose()
 
 
