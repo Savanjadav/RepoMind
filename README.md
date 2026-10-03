@@ -11,7 +11,8 @@ answers that can be checked against source files and line ranges.
 > TypeScript, documentation/configuration chunking, persisted code units, a
 > read-only code-unit browser API, and local Sentence Transformers embeddings
 > with pgvector storage. Repository questions use bounded retrieval, outgoing-call
-> expansion, and grounded local generation. The frontend remains in development.
+> expansion, and grounded local generation. A minimal Next.js interface verifies
+> backend connectivity; repository workflows are not yet exposed in the frontend.
 
 ## Currently Implemented
 
@@ -470,11 +471,11 @@ generated text.
 - Ollama
 - Docker Compose
 - Optional Redis search caching and advisory indexing-reservation leases
+- Next.js App Router, React and TypeScript connectivity interface
 - pytest, Ruff, and Mypy
 
 ### Planned for v0.1.0
 
-- Next.js and React
 - GitHub Actions
 - Prometheus and Grafana
 
@@ -540,6 +541,43 @@ The API is then available at `http://127.0.0.1:8000`. The application requires
 `DATABASE_URL` for database-backed endpoints. Repositories must already exist in
 the database: the indexing endpoint schedules their ingestion but does not
 register them. The code-unit browser operates on persisted database state.
+
+## Run the Frontend Locally
+
+Use Node 24 LTS and npm. From `frontend/`:
+
+```bash
+npm ci
+cp .env.example .env.local
+npm run dev -- --hostname 127.0.0.1 --port 3000
+```
+
+Open `http://127.0.0.1:3000`. Start FastAPI separately using the backend
+instructions above. The server-only `REPOMIND_API_BASE_URL` defaults to
+`http://127.0.0.1:8000`; configure it in `frontend/.env.local` if needed. An
+explicit empty value is invalid. Only HTTP/HTTPS origins are accepted, without
+credentials, query, fragment or a non-root path. Do not copy database or Redis
+credentials into the frontend environment.
+
+Next.js calls `/health` on the server for each page request with no fetch cache,
+a five-second timeout and no retries. The browser does not call FastAPI directly,
+so this shell requires no backend CORS configuration. The page reports connected,
+unavailable, invalid-configuration or unexpected-response states; **Check again**
+reloads the page. Connected means FastAPI connectivity, not PostgreSQL, Redis,
+indexing or model readiness. No repository, search or Q&A UI is included yet.
+
+Frontend checks:
+
+```bash
+npm run lint
+npm run typecheck
+npm run build
+```
+
+The build does not require FastAPI to be running. `typecheck` generates Next.js
+route types before checking TypeScript. Keep the generated `next-env.d.ts` locally;
+the current scaffold ignores it along with `.next/`, dependencies and local env
+files. Commit the npm lockfile for reproducible installs.
 
 ## Current API
 
