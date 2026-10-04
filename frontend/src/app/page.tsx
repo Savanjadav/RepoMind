@@ -1,5 +1,6 @@
 import { connection } from "next/server";
-import { getBackendHealth } from "@/lib/api";
+import { getBackendHealth, listRepositories } from "@/lib/api";
+import RepositoryForm from "./repository-form";
 
 const messages = {
   connected: "Connected",
@@ -11,7 +12,7 @@ const messages = {
 
 export default async function Home() {
   await connection();
-  const health = await getBackendHealth();
+  const [health, repositories] = await Promise.all([getBackendHealth(), listRepositories()]);
   return (
     <main className="shell">
       <header>
@@ -31,6 +32,29 @@ export default async function Home() {
         <form action="/" method="get">
           <button className="retry" type="submit">Check again <span aria-hidden="true">↗</span></button>
         </form>
+      </section>
+      <section className="connection" aria-labelledby="register-heading">
+        <h2 id="register-heading">Add a repository</h2>
+        <RepositoryForm />
+      </section>
+      <section className="connection" aria-labelledby="repositories-heading">
+        <h2 id="repositories-heading">Latest registered repositories</h2>
+        <p className="detail">Latest 100 registrations. Registration does not mean indexing is complete.</p>
+        {!repositories.ok ? (
+          <p role="status">Could not load repositories. Check the backend connection and try Check again.</p>
+        ) : repositories.items.length === 0 ? (
+          <p>No repositories registered yet. Add a GitHub URL above.</p>
+        ) : (
+          <ul className="repositories">
+            {repositories.items.map((repository) => (
+              <li key={repository.id}>
+                <h3>{repository.name}</h3>
+                <p className="repository-source">{repository.source}</p>
+                <p className="detail">Registered <time dateTime={repository.created_at}>{new Date(repository.created_at).toISOString().slice(0, 10)} UTC</time></p>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </main>
   );

@@ -21,6 +21,16 @@ h2 { margin: 0 0 1.5rem; font-size: 1rem; }
 .retry { display: inline-block; margin-top: 1rem; padding: .5rem 0; border: 0; background: none; font: inherit; color: #175540; font-weight: 600; text-decoration: underline; text-underline-offset: .3em; cursor: pointer; }
 .retry:hover { color: #103b2c; }
 .retry:focus-visible { outline: 2px solid #175540; outline-offset: 5px; }
+.repository-form label { display: block; font-weight: 600; margin-bottom: .75rem; }
+.repository-form input { width: 100%; padding: .85rem; border: 1px solid #7b8c84; border-radius: .4rem; font: inherit; color: inherit; background: #fff; }
+.repository-form input:focus-visible, .submit:focus-visible { outline: 2px solid #175540; outline-offset: 3px; }
+.repository-form input[aria-invalid="true"] { border-color: #9b3028; }
+.submit { background: #175540; color: #fff; border: 0; border-radius: .4rem; padding: .8rem 1.2rem; font: inherit; font-weight: 600; cursor: pointer; }
+.submit:disabled { opacity: .65; cursor: wait; }
+.repositories { list-style: none; padding: 0; margin: 0; }
+.repositories li { padding: 1rem 0; border-top: 1px solid #d3ddd6; }
+.repositories h3 { font-size: 1rem; margin: 0; }
+.repository-source { overflow-wrap: anywhere; line-height: 1.5; }
 @media (max-width: 480px) {
   .shell { margin-top: 3rem; }
   .connection { padding: 1.5rem; }

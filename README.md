@@ -11,8 +11,8 @@ answers that can be checked against source files and line ranges.
 > TypeScript, documentation/configuration chunking, persisted code units, a
 > read-only code-unit browser API, and local Sentence Transformers embeddings
 > with pgvector storage. Repository questions use bounded retrieval, outgoing-call
-> expansion, and grounded local generation. A minimal Next.js interface verifies
-> backend connectivity; repository workflows are not yet exposed in the frontend.
+> expansion, and grounded local generation. The Next.js interface checks backend
+> connectivity and registers/lists repository metadata without starting indexing.
 
 ## Currently Implemented
 
@@ -165,7 +165,7 @@ one pending job and returns HTTP 202 with `job_id`, `repository_id`, and
 `GET /repositories/{repository_id}/indexing-jobs/{job_id}`. Poll that metadata-only
 resource for coarse persisted status: `pending`, `running`, `completed`, or
 `failed`. Missing resources return 404; active indexing or a busy repository
-returns 409. No repository registration endpoint is added.
+returns 409. Registration is a separate metadata-only operation described below.
 
 The synchronous runner executes through Starlette BackgroundTasks' thread pool
 after the response body is sent. It creates independent database Sessions,
@@ -538,9 +538,9 @@ service publicly. The Python Redis client is a backend dependency; optional refe
 to the running service, not whether its client package is installed.
 
 The API is then available at `http://127.0.0.1:8000`. The application requires
-`DATABASE_URL` for database-backed endpoints. Repositories must already exist in
-the database: the indexing endpoint schedules their ingestion but does not
-register them. The code-unit browser operates on persisted database state.
+`DATABASE_URL` for database-backed endpoints, with migrations current through
+0008. Register repositories using the browser form or `POST /repositories` before
+requesting indexing separately. The code-unit browser operates on persisted data.
 
 ## Run the Frontend Locally
 
@@ -564,11 +564,21 @@ a five-second timeout and no retries. The browser does not call FastAPI directly
 so this shell requires no backend CORS configuration. The page reports connected,
 unavailable, invalid-configuration or unexpected-response states; **Check again**
 reloads the page. Connected means FastAPI connectivity, not PostgreSQL, Redis,
-indexing or model readiness. No repository, search or Q&A UI is included yet.
+indexing or model readiness. The repository form registers public GitHub-shaped
+HTTPS URLs and the list shows the latest 100 registrations. Registration does not
+verify repository existence, public accessibility or cloneability, and does not
+start indexing. No indexing-progress, search or Q&A UI is included yet.
+
+The form submits through a Next.js Server Action; backend configuration stays
+server-only. Registration and list requests have a five-second timeout and no
+automatic retries. If a registration response is lost, its outcome is uncertain:
+use **Check again** to inspect the list before submitting again. A successful
+registration remains successful even if refreshing the list subsequently fails.
 
 Frontend checks:
 
 ```bash
+npm run test
 npm run lint
 npm run typecheck
 npm run build
@@ -580,6 +590,32 @@ the current scaffold ignores it along with `.next/`, dependencies and local env
 files. Commit the npm lockfile for reproducible installs.
 
 ## Current API
+
+### Repository Registration and Listing
+
+`POST /repositories` accepts only `{"source":"https://github.com/owner/repo"}`
+(string, at most 2,048 characters). It returns HTTP 201 with `id`, `name`, `source`
+and timezone-aware `created_at`. The name is derived from the repository component.
+No job, clone, file scan, embedding or model call is performed.
+
+New registrations require GitHub HTTPS URLs with owner/repository paths. Owner
+and repository identity are lowercased; an optional `.git` suffix and trailing
+slash are removed. An explicit standard HTTPS port is accepted. Credentials,
+query/fragment, nonstandard ports, controls/whitespace, encoded paths, dot paths,
+subpaths and local sources are rejected. Validation is structural only; no
+GitHub request is made. Invalid requests return 422; duplicate canonical sources
+return 409. PostgreSQL source uniqueness protects concurrent new registrations.
+
+Historical source values are not normalized or rewritten. A historical
+noncanonical value can coexist with a new canonical registration of the same
+GitHub identity; raw-string uniqueness does not guarantee historical semantic
+deduplication.
+
+`GET /repositories` returns `{"items":[...],"limit":100,"offset":0}` with the same
+four public metadata fields per item. `limit` defaults to 100 (range 1–100) and
+`offset` defaults to zero (nonnegative). Ordering is `created_at DESC, id DESC`.
+No generation, indexing state, counts or source content is returned. The browser
+shows stored sources as text, including historical non-GitHub values.
 
 ### Repository Impact
 

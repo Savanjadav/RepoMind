@@ -4,6 +4,7 @@ from app.ask_api import router as ask_router
 from app.code_unit_api import router as code_unit_router
 from app.impact_api import router as impact_router
 from app.indexing_api import router as indexing_router
+from app.repository_api import router as repository_router
 from app.search_api import router as search_router
 
 app = FastAPI(title="RepoMind", version="0.1.0")
@@ -12,6 +13,7 @@ app.include_router(search_router)
 app.include_router(ask_router)
 app.include_router(impact_router)
 app.include_router(indexing_router)
+app.include_router(repository_router)
 
 
 @app.get("/health")
