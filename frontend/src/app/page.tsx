@@ -1,6 +1,7 @@
 import { connection } from "next/server";
-import { getBackendHealth, listRepositories } from "@/lib/api";
+import { getBackendHealth, getRepositoryIndexingSummaries, listRepositories } from "@/lib/api";
 import RepositoryForm from "./repository-form";
+import RepositoryIndexing from "./repository-indexing";
 
 const messages = {
   connected: "Connected",
@@ -13,6 +14,9 @@ const messages = {
 export default async function Home() {
   await connection();
   const [health, repositories] = await Promise.all([getBackendHealth(), listRepositories()]);
+  const summaries = repositories.ok && repositories.items.length ?
+    await getRepositoryIndexingSummaries(repositories.items.map((repo) => repo.id)) : null;
+  const initial = summaries?.ok ? summaries.items : null;
   return (
     <main className="shell">
       <header>
@@ -45,15 +49,7 @@ export default async function Home() {
         ) : repositories.items.length === 0 ? (
           <p>No repositories registered yet. Add a GitHub URL above.</p>
         ) : (
-          <ul className="repositories">
-            {repositories.items.map((repository) => (
-              <li key={repository.id}>
-                <h3>{repository.name}</h3>
-                <p className="repository-source">{repository.source}</p>
-                <p className="detail">Registered <time dateTime={repository.created_at}>{new Date(repository.created_at).toISOString().slice(0, 10)} UTC</time></p>
-              </li>
-            ))}
-          </ul>
+          <RepositoryIndexing key={JSON.stringify([repositories.items, initial])} repositories={repositories.items} initial={initial} />
         )}
       </section>
     </main>

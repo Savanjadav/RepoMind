@@ -1,7 +1,38 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { registerRepository } from "@/lib/api";
+import { registerRepository, startRepositoryIndexing } from "@/lib/api";
+
+export type { IndexingSummary, Repository } from "@/lib/api";
+
+export type StartIndexingState = {
+  status: "accepted" | "conflict" | "uncertain" | "error";
+  message: string;
+  jobId?: string;
+};
+
+export async function startIndexing(form: FormData): Promise<StartIndexingState> {
+  const entries = [...form.entries()];
+  const id = form.get("repository_id");
+  if (entries.length !== 1 || entries[0][0] !== "repository_id" || typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(id)) {
+    return { status: "error", message: "Invalid repository identifier." };
+  }
+  const result = await startRepositoryIndexing(id);
+  if (result.ok) return { status: "accepted", jobId: result.job_id, message: "Indexing request accepted." };
+  if (result.error === "conflict") return { status: "conflict", message: "Indexing is already active or the repository is busy." };
+  if (result.error === "uncertain") return {
+    status: "uncertain", message: "The indexing request outcome is uncertain. Refreshing status before another start.",
+  };
+  const messages = {
+    invalid: "This repository cannot be indexed. Check its source.",
+    not_found: "Repository no longer exists. Reload the repository list.",
+    configuration: "Indexing service configuration is invalid.",
+    unavailable: "Indexing service is temporarily unavailable.",
+    response: "Unexpected indexing service response.",
+  };
+  return { status: "error", message: messages[result.error] };
+}
 
 export type RegistrationState = {
   status: "idle" | "success" | "error";

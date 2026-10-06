@@ -12,7 +12,8 @@ answers that can be checked against source files and line ranges.
 > read-only code-unit browser API, and local Sentence Transformers embeddings
 > with pgvector storage. Repository questions use bounded retrieval, outgoing-call
 > expansion, and grounded local generation. The Next.js interface checks backend
-> connectivity and registers/lists repository metadata without starting indexing.
+> connectivity, registers/lists repository metadata, and lets users explicitly
+> start indexing and observe its persisted status and completed snapshot counts.
 
 ## Currently Implemented
 
@@ -166,6 +167,20 @@ one pending job and returns HTTP 202 with `job_id`, `repository_id`, and
 resource for coarse persisted status: `pending`, `running`, `completed`, or
 `failed`. Missing resources return 404; active indexing or a busy repository
 returns 409. Registration is a separate metadata-only operation described below.
+
+`GET /repositories/indexing-summary` accepts 1–100 repeated `repository_id` UUID
+query parameters, deduplicates them, and returns `items` ordered by repository ID.
+Each item contains `repository_id`, `latest_job`, and `snapshot_counts`. A job is
+selected by `created_at DESC, id DESC` within its repository; the UUID is only a
+tie-breaker, not a chronological claim. `latest_job` is null when no run is
+recorded, otherwise it contains `job_id`, `status`, and `created_at`.
+
+`snapshot_counts` contains nonnegative `files` and `code_units` only when that
+latest job is completed; otherwise it is null. These are committed snapshot
+counts, not current-run progress counters. One read-only SQL statement observes
+job state and separate counts together, without loading source or embeddings.
+Invalid input returns 422; any missing requested repository makes the batch 404.
+Existing registration/list and exact-job response contracts are unchanged.
 
 The synchronous runner executes through Starlette BackgroundTasks' thread pool
 after the response body is sent. It creates independent database Sessions,
@@ -567,13 +582,43 @@ reloads the page. Connected means FastAPI connectivity, not PostgreSQL, Redis,
 indexing or model readiness. The repository form registers public GitHub-shaped
 HTTPS URLs and the list shows the latest 100 registrations. Registration does not
 verify repository existence, public accessibility or cloneability, and does not
-start indexing. No indexing-progress, search or Q&A UI is included yet.
+start indexing automatically. Use **Index repository** explicitly; completed
+repositories offer **Reindex repository**, and failed runs offer **Try indexing
+again**. No search or Q&A UI is included yet.
 
 The form submits through a Next.js Server Action; backend configuration stays
 server-only. Registration and list requests have a five-second timeout and no
 automatic retries. If a registration response is lost, its outcome is uncertain:
 use **Check again** to inspect the list before submitting again. A successful
 registration remains successful even if refreshing the list subsequently fails.
+
+Indexing starts through a Server Action. Status reads use a fixed same-origin
+Next.js GET route, keeping the FastAPI origin server-only. Initial page rendering
+discovers the latest persisted jobs, so reload resumes observation without
+localStorage. **Not indexed** means no indexing run is recorded. **Pending** and
+**Indexing…** mean the backend reports pending/running. **Ready** means the latest
+run completed with code units available; it does not check Ollama or guarantee
+retrieval quality. A completed run with zero code units is labeled **Completed —
+no searchable code units found**. Completed rows show **Indexed snapshot — Files /
+Code units**; counts are hidden during a new run and after failure, not presented
+as progress. A previous completed snapshot may still be available during or
+after a failed reindex.
+
+One shared polling loop batches only active repositories, waiting three seconds
+after a read finishes. It stops at completed/failed, pauses in hidden tabs, and
+cleans up on navigation. Read failures retain the last known state, back off to
+six/twelve seconds, and pause automatic polling after three consecutive failures.
+**Refresh status** reads state without starting work and also discovers jobs
+started elsewhere. Repository-list changes requiring rediscovery ask for a page
+reload. An ambiguous start response is never automatically retried: the UI
+discovers status and keeps starting disabled while its outcome is unresolved.
+An unchanged old job or no job does not establish that the POST failed.
+
+Failed jobs display generic feedback, not logs or invented failure reasons:
+**Indexing failed. No changes from this run were committed.** Job error details
+are not persisted. In-process BackgroundTasks remain non-durable: abrupt backend
+termination can leave pending/running jobs indefinitely. Polling/reloading does
+not recover them; there is no automatic stale-job recovery or durable queue.
 
 Frontend checks:
 

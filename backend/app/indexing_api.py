@@ -1,13 +1,14 @@
 import logging
 from collections.abc import Iterator
 from contextlib import nullcontext
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import case, func, select, true
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
@@ -20,7 +21,10 @@ from app.indexing_jobs import (
     reserve_indexing_job,
     run_indexing_job,
 )
+from app.models.code_unit import CodeUnit
+from app.models.file import File
 from app.models.indexing_job import IndexingJob
+from app.models.repository import Repository
 from app.redis_cache import RedisCache, get_redis_cache
 
 router = APIRouter()
@@ -31,6 +35,27 @@ class IndexingJobResponse(BaseModel):
     job_id: UUID
     repository_id: UUID
     status: Literal["pending", "running", "completed", "failed"]
+
+
+class LatestIndexingJob(BaseModel):
+    job_id: UUID
+    status: Literal["pending", "running", "completed", "failed"]
+    created_at: datetime
+
+
+class SnapshotCounts(BaseModel):
+    files: int = Field(ge=0)
+    code_units: int = Field(ge=0)
+
+
+class IndexingSummary(BaseModel):
+    repository_id: UUID
+    latest_job: LatestIndexingJob | None
+    snapshot_counts: SnapshotCounts | None
+
+
+class IndexingSummaryResponse(BaseModel):
+    items: list[IndexingSummary]
 
 
 def _request_error(error: Exception) -> HTTPException:
@@ -67,6 +92,79 @@ def get_indexing_session() -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+@router.get("/repositories/indexing-summary", response_model=IndexingSummaryResponse)
+def get_indexing_summaries(
+    repository_id: Annotated[list[UUID], Query(min_length=1, max_length=100)],
+    session: Annotated[Session, Depends(get_indexing_session)],
+) -> IndexingSummaryResponse:
+    ids = sorted(set(repository_id))
+    latest = (
+        select(IndexingJob.id, IndexingJob.status, IndexingJob.created_at)
+        .where(IndexingJob.repository_id == Repository.id)
+        .order_by(IndexingJob.created_at.desc(), IndexingJob.id.desc())
+        .limit(1)
+        .correlate(Repository)
+        .lateral("latest_job")
+    )
+    files = (
+        select(func.count(File.id))
+        .where(File.repository_id == Repository.id)
+        .correlate(Repository)
+        .scalar_subquery()
+    )
+    units = (
+        select(func.count(CodeUnit.id))
+        .join(File, CodeUnit.file_id == File.id)
+        .where(File.repository_id == Repository.id)
+        .correlate(Repository)
+        .scalar_subquery()
+    )
+    # One statement observes job state and counts in the same committed snapshot.
+    # Separate aggregates prevent File x CodeUnit count multiplication. No ORM
+    # entities/content/vectors are loaded, and active runs do not expose old counts.
+    statement = (
+        select(
+            Repository.id.label("repository_id"),
+            latest.c.id.label("job_id"),
+            latest.c.status,
+            latest.c.created_at,
+            case((latest.c.status == "completed", files)).label("files"),
+            case((latest.c.status == "completed", units)).label("code_units"),
+        )
+        .outerjoin(latest, true())
+        .where(Repository.id.in_(ids))
+        .order_by(Repository.id)
+    )
+    try:
+        rows = session.execute(statement).mappings().all()
+    except (DBAPIError, PoolTimeoutError) as error:
+        raise _request_error(error) from None
+    if len(rows) != len(ids):
+        raise HTTPException(404, "Repository not found")
+    return IndexingSummaryResponse(
+        items=[
+            IndexingSummary(
+                repository_id=row["repository_id"],
+                latest_job=(
+                    LatestIndexingJob(
+                        job_id=row["job_id"],
+                        status=row["status"],
+                        created_at=row["created_at"],
+                    )
+                    if row["job_id"] is not None
+                    else None
+                ),
+                snapshot_counts=(
+                    SnapshotCounts(files=row["files"], code_units=row["code_units"])
+                    if row["status"] == "completed"
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+    )
 
 
 @router.post(

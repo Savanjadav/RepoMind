@@ -1,6 +1,7 @@
 import asyncio
 import os
 from collections.abc import Iterator, MutableMapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import Mock
 from uuid import UUID, uuid4
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from redis import Redis
 from redis.exceptions import ConnectionError, TimeoutError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,8 @@ from app import indexing_api as api
 from app import indexing_jobs as jobs
 from app.database import create_database_engine, create_session_factory
 from app.main import app
+from app.models.code_unit import CodeUnit
+from app.models.file import File
 from app.models.indexing_job import IndexingJob
 from app.models.repository import Repository
 from app.redis_cache import RedisCache, get_redis_cache
@@ -360,3 +363,234 @@ def test_failed_commit_releases_lease_without_dispatch(
     assert calls == []
     assert client.eval.call_count == 1
     monkeypatch.undo()
+
+
+def _summary(client: TestClient, *ids: UUID) -> Any:
+    return client.get(
+        "/repositories/indexing-summary",
+        params=[("repository_id", str(rid)) for rid in ids],
+    )
+
+
+def _snapshot_rows(session: Session, rid: UUID) -> None:
+    populated = File(repository_id=rid, path="populated.py")
+    session.add_all([populated, File(repository_id=rid, path="empty.py")])
+    session.flush()
+    session.add_all(
+        [
+            CodeUnit(
+                file_id=populated.id,
+                kind="function",
+                content="PRIVATE SOURCE",
+                language="python",
+                start_line=n,
+                end_line=n,
+                symbol_name=f"f{n}",
+            )
+            for n in range(1, 6)
+        ]
+    )
+
+
+@pytest.mark.parametrize("status", [None, "pending", "running", "completed", "failed"])
+def test_summary_states_and_counts(
+    database: tuple[Any, UUID, list[UUID]], status: str | None
+) -> None:
+    factory, rid, calls = database
+    with factory() as session:
+        _snapshot_rows(session, rid)
+        if status is not None:
+            job = IndexingJob(repository_id=rid, status=status)
+            session.add(job)
+        session.commit()
+        job_id = job.id if status is not None else None
+    with TestClient(app) as client:
+        response = _summary(client, rid)
+    assert response.status_code == 200
+    assert set(response.json()) == {"items"}
+    [item] = response.json()["items"]
+    assert set(item) == {"repository_id", "latest_job", "snapshot_counts"}
+    assert item["repository_id"] == str(rid)
+    if status is None:
+        assert item["latest_job"] is None
+    else:
+        assert set(item["latest_job"]) == {"job_id", "status", "created_at"}
+        assert item["latest_job"]["job_id"] == str(job_id)
+        assert item["latest_job"]["status"] == status
+        assert datetime.fromisoformat(item["latest_job"]["created_at"]).tzinfo
+    assert item["snapshot_counts"] == (
+        {"files": 2, "code_units": 5} if status == "completed" else None
+    )
+    assert "PRIVATE" not in response.text and calls == []
+
+
+def test_summary_latest_order_is_scoped_and_deterministic(
+    database: tuple[Any, UUID, list[UUID]],
+) -> None:
+    factory, rid, _ = database
+    other = uuid4()
+    low, high = sorted([uuid4(), uuid4()])
+    now = datetime.now(UTC)
+    try:
+        with factory() as session:
+            session.add(Repository(id=other, name="other", source=f"/test/{other}"))
+            session.flush()
+            session.add_all(
+                [
+                    IndexingJob(
+                        repository_id=rid,
+                        status="failed",
+                        created_at=now - timedelta(days=1),
+                    ),
+                    IndexingJob(
+                        id=low, repository_id=rid, status="running", created_at=now
+                    ),
+                    IndexingJob(
+                        id=high, repository_id=rid, status="completed", created_at=now
+                    ),
+                    IndexingJob(
+                        repository_id=other,
+                        status="completed",
+                        created_at=now + timedelta(days=1),
+                    ),
+                ]
+            )
+            _snapshot_rows(session, other)
+            session.commit()
+        with TestClient(app) as client:
+            response = _summary(client, other, rid, rid)
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert [row["repository_id"] for row in items] == sorted([str(rid), str(other)])
+        by_id = {row["repository_id"]: row for row in items}
+        assert by_id[str(rid)]["latest_job"]["job_id"] == str(high)
+        assert by_id[str(rid)]["snapshot_counts"] == {"files": 0, "code_units": 0}
+        assert by_id[str(other)]["snapshot_counts"] == {"files": 2, "code_units": 5}
+    finally:
+        with factory() as session:
+            session.execute(delete(Repository).where(Repository.id == other))
+            session.commit()
+
+
+@pytest.mark.parametrize("values", [[], ["bad"], ["../health"], [str(uuid4())] * 101])
+def test_summary_query_validation(
+    database: tuple[Any, UUID, list[UUID]], values: list[str]
+) -> None:
+    with TestClient(app) as client:
+        response = client.get(
+            "/repositories/indexing-summary",
+            params=[("repository_id", value) for value in values],
+        )
+    assert response.status_code == 422
+
+
+def test_summary_missing_repository_does_not_silently_omit(
+    database: tuple[Any, UUID, list[UUID]],
+) -> None:
+    _, rid, _ = database
+    with TestClient(app) as client:
+        response = _summary(client, rid, uuid4())
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Repository not found"}
+
+
+def test_summary_is_one_read_only_metadata_statement(
+    database: tuple[Any, UUID, list[UUID]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory, rid, calls = database
+    statements: list[str] = []
+
+    def record(*args: Any) -> None:
+        statements.append(args[2])
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Summary must not write, acquire Redis, or dispatch indexing")
+
+    for method in ("commit", "flush", "add", "delete"):
+        monkeypatch.setattr(Session, method, forbidden)
+    monkeypatch.setattr(api, "reserve_indexing_job", forbidden)
+    monkeypatch.setattr(api, "run_indexing_job", forbidden)
+    app.dependency_overrides[get_redis_cache] = forbidden
+    engine = factory.kw["bind"]
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        with TestClient(app) as client:
+            assert _summary(client, rid).status_code == 200
+        assert len(statements) == 1
+        sql = statements[0].lower()
+        assert sql.startswith("select") and "for update" not in sql
+        assert "code_units.content" not in sql and "code_units.embedding" not in sql
+        assert calls == []
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_summary_database_errors_are_sanitized(
+    database: tuple[Any, UUID, list[UUID]],
+    monkeypatch: pytest.MonkeyPatch,
+    unavailable: bool,
+) -> None:
+    _, rid, _ = database
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        error = OperationalError if unavailable else IntegrityError
+        raise error("SECRET SQL", {}, Exception("SECRET database"))
+
+    monkeypatch.setattr(Session, "execute", fail)
+    with TestClient(app) as client:
+        response = _summary(client, rid)
+    assert response.status_code == (503 if unavailable else 500)
+    assert "SECRET" not in response.text
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize("succeed", [False, True])
+def test_summary_commit_visibility(
+    database: tuple[Any, UUID, list[UUID]], succeed: bool
+) -> None:
+    factory, rid, _ = database
+    with factory() as session:
+        session.add(
+            IndexingJob(
+                repository_id=rid,
+                status="completed",
+                created_at=datetime.now(UTC) - timedelta(days=1),
+            )
+        )
+        _snapshot_rows(session, rid)
+        session.commit()
+    with TestClient(app) as client, factory() as writer:
+        assert _summary(client, rid).json()["items"][0]["snapshot_counts"] == {
+            "files": 2,
+            "code_units": 5,
+        }
+        job = IndexingJob(repository_id=rid, status="running")
+        writer.add(job)
+        writer.commit()
+        job_id = job.id
+        writer.add(File(repository_id=rid, path="new.py"))
+        job.status = "completed"
+        writer.flush()
+        # Independent request sees committed running, not flushed completion/counts.
+        item = _summary(client, rid).json()["items"][0]
+        assert item["latest_job"]["status"] == "running"
+        assert item["snapshot_counts"] is None
+        if succeed:
+            writer.commit()
+            item = _summary(client, rid).json()["items"][0]
+            assert item["latest_job"]["status"] == "completed"
+            assert item["snapshot_counts"] == {"files": 3, "code_units": 5}
+        else:
+            writer.rollback()
+            stored = writer.get(IndexingJob, job_id)
+            assert stored is not None
+            stored.status = "failed"
+            writer.commit()
+            item = _summary(client, rid).json()["items"][0]
+            assert item["latest_job"]["status"] == "failed"
+            assert item["snapshot_counts"] is None
+            assert set(
+                writer.scalars(select(File.path).where(File.repository_id == rid))
+            ) == {"populated.py", "empty.py"}

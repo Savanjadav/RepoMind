@@ -31,6 +31,8 @@ h2 { margin: 0 0 1.5rem; font-size: 1rem; }
 .repositories li { padding: 1rem 0; border-top: 1px solid #d3ddd6; }
 .repositories h3 { font-size: 1rem; margin: 0; }
 .repository-source { overflow-wrap: anywhere; line-height: 1.5; }
+.indexing-state { font-weight: 600; }
+.retry:disabled { opacity: .65; cursor: wait; }
 @media (max-width: 480px) {
   .shell { margin-top: 3rem; }
   .connection { padding: 1.5rem; }
