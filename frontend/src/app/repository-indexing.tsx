@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { startIndexing, type IndexingSummary, type Repository } from "./actions";
+import RepositoryQA from "./repository-qa";
 
 type Operation = {
   sending: boolean;
@@ -12,6 +13,7 @@ type Operation = {
 type View = {
   summaries: Record<string, IndexingSummary>;
   operations: Record<string, Operation>;
+  readinessRefresh: Record<string, true>;
   warning: string;
   reading: boolean;
 };
@@ -20,9 +22,10 @@ export default function RepositoryIndexing({ repositories, initial }: {
   repositories: Repository[];
   initial: IndexingSummary[] | null;
 }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>(() => ({
     summaries: Object.fromEntries((initial ?? []).map((item) => [item.repository_id, item])),
-    operations: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false,
+    operations: {}, readinessRefresh: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false,
   }));
   const controls = useRef<{ refresh: () => void; start: (id: string, form: FormData) => void } | null>(null);
 
@@ -31,7 +34,7 @@ export default function RepositoryIndexing({ repositories, initial }: {
     // keys this component by its server snapshot so new props get fresh state.
     let state: View = {
       summaries: Object.fromEntries((initial ?? []).map((item) => [item.repository_id, item])),
-      operations: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false,
+      operations: {}, readinessRefresh: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false,
     };
     let alive = true;
     let epoch = 0;
@@ -85,7 +88,10 @@ export default function RepositoryIndexing({ repositories, initial }: {
         if (!Array.isArray(data.items)) throw new Error("Status unavailable");
         const summaries = { ...state.summaries };
         const operations = { ...state.operations };
+        const readinessRefresh = { ...state.readinessRefresh };
         for (const item of data.items) {
+          // Conflict freshness is restored by observation, not a new job ID.
+          delete readinessRefresh[item.repository_id];
           const operation = operations[item.repository_id];
           const waiting = operation?.awaiting;
           if (waiting) {
@@ -100,7 +106,7 @@ export default function RepositoryIndexing({ repositories, initial }: {
         }
         failures = 0;
         paused = false;
-        state = { ...state, summaries, operations, warning: "" };
+        state = { ...state, summaries, operations, readinessRefresh, warning: "" };
       } catch {
         if (!alive || token !== epoch || abort.signal.aborted) return;
         failures++;
@@ -140,7 +146,8 @@ export default function RepositoryIndexing({ repositories, initial }: {
       if (result.status === "uncertain" && !baseline) {
         result = { ...result, message: "The indexing request outcome is uncertain. Status could not be matched to this request." };
       }
-      state = { ...state, operations: { ...state.operations, [id]: { sending: false, message: result.message, awaiting } } };
+      state = { ...state, operations: { ...state.operations, [id]: { sending: false, message: result.message, awaiting } },
+        readinessRefresh: result.status === "conflict" ? { ...state.readinessRefresh, [id]: true } : state.readinessRefresh };
       publish();
       if (awaiting || result.status === "conflict") refresh([id]);
       else schedule();
@@ -160,6 +167,16 @@ export default function RepositoryIndexing({ repositories, initial }: {
     };
   }, [initial, repositories]);
 
+  const readiness = (id: string) => {
+    const item = view.summaries[id];
+    const operation = view.operations[id];
+    if (view.warning || !item || operation?.awaiting || view.readinessRefresh[id]) return "Refresh indexing status before asking.";
+    if (operation?.sending || item.latest_job?.status === "pending" || item.latest_job?.status === "running") return "Wait for indexing to finish before asking questions.";
+    if (!item.latest_job) return "Index this repository before asking questions.";
+    if (item.latest_job.status === "failed") return "The latest indexing run failed. Complete indexing before asking here.";
+    return item.snapshot_counts && item.snapshot_counts.code_units > 0 ? "" : "No searchable code units are available.";
+  };
+  const selected = repositories.find((repo) => repo.id === selectedId);
   return <>
     <button className="retry" type="button" disabled={view.reading} onClick={() => controls.current?.refresh()}>Refresh status</button>
     <p role="status" aria-live="polite">{view.warning}</p>
@@ -193,8 +210,11 @@ export default function RepositoryIndexing({ repositories, initial }: {
             </button>
           </form>
           <p role="status" aria-live="polite">{operation?.message ?? ""}</p>
+          <button className="retry" type="button" disabled={Boolean(readiness(repo.id))} onClick={() => setSelectedId(repo.id)}>Ask about this repository</button>
+          {readiness(repo.id) && <p className="detail">{readiness(repo.id)}</p>}
         </li>;
       })}
     </ul>
+    {selected && <RepositoryQA key={`${selected.id}:${readiness(selected.id)}`} repositoryId={selected.id} name={selected.name} disabledReason={readiness(selected.id)} />}
   </>;
 }

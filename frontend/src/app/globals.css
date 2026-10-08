@@ -32,6 +32,11 @@ h2 { margin: 0 0 1.5rem; font-size: 1rem; }
 .repositories h3 { font-size: 1rem; margin: 0; }
 .repository-source { overflow-wrap: anywhere; line-height: 1.5; }
 .indexing-state { font-weight: 600; }
+.qa { margin-top: 2rem; border-top: 1px solid #d3ddd6; padding-top: 1rem; }
+.qa label { display: block; font-weight: 600; margin-bottom: .5rem; }
+.qa textarea { display: block; width: 100%; padding: .75rem; margin-bottom: 1rem; font: inherit; }
+.qa textarea:focus-visible { outline: 2px solid #175540; outline-offset: 3px; }
+.qa-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 .retry:disabled { opacity: .65; cursor: wait; }
 @media (max-width: 480px) {
   .shell { margin-top: 3rem; }

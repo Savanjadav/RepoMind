@@ -15,6 +15,8 @@ const actionPath = "../app/actions.ts";
 const routePath = "../app/api/indexing-summary/route.ts";
 const actions: typeof import("../app/actions") = await import(actionPath);
 const route: typeof import("../app/api/indexing-summary/route") = await import(routePath);
+const askRoutePath = "../app/api/ask/route.ts";
+const askRoute: typeof import("../app/api/ask/route") = await import(askRoutePath);
 hook.deregister();
 const originalFetch = globalThis.fetch;
 const originalUrl = process.env.REPOMIND_API_BASE_URL;
@@ -278,4 +280,151 @@ test("real GET handler projects validated data and sanitizes failures", async ()
   const missing = await route.GET(request);
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { error: "not_found" });
+});
+
+const citation = { evidence_id: 1, repository_name: "repo", path: "a.py", symbol_name: null, start_line: 1, end_line: 2 };
+const answer = { answer: "  Answer [Evidence 1]\n", citations: [citation] };
+test("ask uses exact question and fixed POST without retrieval controls", async () => {
+  const q = "  Unicode 😀\t\r\nquestion  ";
+  respond({ ...answer, secret: "SECRET" });
+  assert.deepEqual(await api.askRepository(rid, q), { ok: true, data: answer });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8000/ask");
+  assert.equal(calls[0].options?.method, "POST");
+  assert.deepEqual(JSON.parse(String(calls[0].options?.body)), { repository_id: rid, q });
+  assert.equal(calls[0].options?.cache, "no-store");
+  assert.equal(calls[0].options?.redirect, "error");
+  assert.deepEqual(calls[0].options?.headers, { "Content-Type": "application/json" });
+});
+for (const q of ["", " \t\r\n", "😀".repeat(2001), ...Array.from({ length: 32 }, (_, i) => i).filter(i => ![9,10,13].includes(i)).map(i => `a${String.fromCharCode(i)}b`), "a\x7fb"]) {
+  test(`ask rejects question ${JSON.stringify(q).slice(0,40)}`, async () => {
+    respond(answer);
+    assert.deepEqual(await api.askRepository(rid, q), { ok: false, error: "invalid" });
+    assert.equal(calls.length, 0);
+  });
+}
+test("ask accepts 2000 Unicode code points and rejects injected UUID", async () => {
+  respond(answer);
+  assert.equal((await api.askRepository(rid, "😀".repeat(2000))).ok, true);
+  assert.deepEqual(await api.askRepository(`${rid}/ask`, "q"), { ok: false, error: "invalid" });
+  assert.equal(calls.length, 1);
+});
+test("ask whitespace validation matches Python NEL/BOM behavior", async () => {
+  respond(answer);
+  assert.deepEqual(await api.askRepository(rid, "\u0085"), { ok: false, error: "invalid" });
+  assert.equal((await api.askRepository(rid, "\ufeff")).ok, true);
+  assert.equal(calls.length, 1);
+});
+for (const text of ["", "   ", "The available evidence is insufficient to answer the question.", "<script>alert(1)</script>"]) {
+  test(`ask preserves answer ${text}`, async () => {
+    respond({ answer: text, citations: [] });
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: true, data: { answer: text, citations: [] } });
+  });
+}
+for (const malformed of [null, [], {}, { ...answer, answer: 1 }, { ...answer, citations: null },
+  ...[{ ...citation, evidence_id: 0 }, { ...citation, evidence_id: 11 }, { ...citation, evidence_id: 1.5 },
+    { ...citation, repository_name: "" }, { ...citation, path: "" }, { ...citation, symbol_name: 1 },
+    { ...citation, start_line: 0 }, { ...citation, end_line: 0 }, { ...citation, end_line: 1.2 }].map(c => ({ ...answer, citations: [c] })),
+  { ...answer, citations: [citation, citation] }]) {
+  test(`ask rejects malformed response ${JSON.stringify(malformed)}`, async () => {
+    respond(malformed);
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error: "response" });
+  });
+}
+test("ask preserves citation order and projects only approved metadata", async () => {
+  const citations = [{ ...citation, evidence_id: 2 }, citation];
+  respond({ answer: "q", citations: citations.map(c => ({ ...c, secret: "SECRET" })) });
+  assert.deepEqual(await api.askRepository(rid, "q"), { ok: true, data: { answer: "q", citations } });
+});
+for (const [status, error] of [[404,"not_found"],[422,"invalid"],[502,"provider"],[503,"unavailable"],[504,"timeout"],[500,"failed"]] as const) {
+  test(`ask maps ${status} without retry or raw error`, async () => {
+    respond({ detail: "SECRET" }, status);
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error });
+    assert.equal(calls.length, 1);
+  });
+}
+test("ask caller abort works before fetch and during body consumption", async () => {
+  respond(answer);
+  const controller = new AbortController(); controller.abort();
+  assert.deepEqual(await api.askRepository(rid, "q", controller.signal), { ok: false, error: "cancelled" });
+  assert.equal(calls.length, 0);
+  const active = new AbortController(); let cancelled = false;
+  globalThis.fetch = async () => new Response(new ReadableStream({ start() { queueMicrotask(() => active.abort()); }, cancel() { cancelled = true; } }));
+  assert.deepEqual(await api.askRepository(rid, "q", active.signal), { ok: false, error: "cancelled" });
+  assert.equal(active.signal.aborted, true);
+  assert.equal(cancelled, true);
+});
+test("bounded JSON reader cancels a pending read and releases its lock", async () => {
+  const controller = new AbortController(); let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+  const reading = api.readBoundedJson(stream, 1024, controller.signal);
+  controller.abort();
+  await assert.rejects(reading, (error: unknown) => error === controller.signal.reason);
+  assert.equal(cancelled, true); assert.equal(stream.locked, false);
+});
+test("bounded JSON reader counts streamed chunks and rejects rather than truncates", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({ start(controller) {
+    controller.enqueue(new TextEncoder().encode('{"x":'));
+    controller.enqueue(new TextEncoder().encode('"123456"}'));
+  }, cancel() { cancelled = true; } });
+  await assert.rejects(api.readBoundedJson(stream, 10), api.JsonBodyError);
+  assert.equal(cancelled, true); assert.equal(stream.locked, false);
+});
+test("ask downstream timeout is 180 seconds and timer is cleared", async () => {
+  const originalSet = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
+  let expire: (() => void) | undefined, delay: number | undefined, cleared = false;
+  globalThis.setTimeout = ((fn: () => void, ms: number) => { expire = fn; delay = ms; return 1; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = (() => { cleared = true; }) as typeof clearTimeout;
+  globalThis.fetch = async (_url, options) => { expire?.(); options?.signal?.throwIfAborted(); return Response.json(answer); };
+  try {
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error: "timeout" });
+    assert.equal(delay, 180000); assert(cleared);
+  } finally { globalThis.setTimeout = originalSet; globalThis.clearTimeout = originalClear; }
+});
+test("ask bounds actual response bytes and rejects malformed JSON", async () => {
+  for (const body of ["x".repeat(1024*1024+1), "not JSON"]) {
+    globalThis.fetch = async () => new Response(body);
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error: "response" });
+  }
+  globalThis.fetch = async () => { throw new TypeError("SECRET"); };
+  assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error: "network" });
+});
+
+function askRequest(body: string, headers: Record<string,string> = {}) {
+  return new Request("http://localhost/api/ask", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
+}
+for (const body of ["bad JSON", "null", "[]", ...[{}, { q:"q" }, { repository_id:rid }, { repository_id:"../ask",q:"q" },
+  ...["", " ", "😀".repeat(2001), "x\0y"].map(q=>({ repository_id:rid,q })),
+  { repository_id:rid,q:"q",url:"https://attacker.invalid" }].map(v=>JSON.stringify(v))]) {
+  test(`ask route rejects ${body.slice(0,60)}`, async () => {
+    respond(answer);
+    const response=await askRoute.POST(askRequest(body));
+    assert.equal(response.status,400); assert.equal(calls.length,0);
+    assert.equal(response.headers.get("Cache-Control"),"no-store");
+  });
+}
+for (const headers of [{}, { "Content-Length":"1" }, { "Content-Length":"invalid" }] as Record<string,string>[]) {
+  test(`ask route enforces actual body bound ${JSON.stringify(headers)}`, async () => {
+    respond(answer);
+    assert.equal((await askRoute.POST(askRequest(" ".repeat(32769),headers))).status,400);
+    assert.equal(calls.length,0);
+  });
+}
+test("ask route content type, origin, projection, errors and no-store", async () => {
+  const body=JSON.stringify({repository_id:rid,q:"q"});
+  respond(answer);
+  assert.equal((await askRoute.POST(askRequest(body,{"Content-Type":"text/plain"}))).status,415);
+  assert.equal((await askRoute.POST(askRequest(body,{Origin:"http://attacker.invalid","Sec-Fetch-Site":"cross-site"}))).status,403);
+  assert.equal((await askRoute.POST(askRequest(body,{"Sec-Fetch-Site":"same-site"}))).status,403);
+  assert.equal((await askRoute.POST(askRequest(body,{"Content-Length":"32769"}))).status,413);
+  assert.equal(calls.length,0);
+  for (const headers of [{}, { Origin:"http://localhost", "Content-Type":"application/json; charset=utf-8" }] as Record<string,string>[]) {
+    const response=await askRoute.POST(askRequest(body,headers));
+    assert.equal(response.status,200); assert.deepEqual(await response.json(),answer);
+    assert.equal(response.headers.get("Cache-Control"),"no-store");
+  }
+  respond({ detail:"SECRET" },503);
+  const response=await askRoute.POST(askRequest(body));
+  assert.equal(response.status,503); assert.deepEqual(await response.json(),{error:"unavailable"});
 });

@@ -281,3 +281,101 @@ export async function getRepositoryIndexingSummaries(repositoryIds: string[]): P
   }
   return { ok: true, items };
 }
+
+export type AskAnswer = { answer: string; citations: {
+  evidence_id: number; repository_name: string; path: string; symbol_name: string | null;
+  start_line: number; end_line: number;
+}[] };
+export type AskError = "invalid" | "not_found" | "unavailable" | "timeout" | "provider" | "network" | "response" | "failed" | "cancelled";
+
+export function validQuestion(value: unknown): value is string {
+  // Python str.strip() whitespace differs from JavaScript trim (NEL and BOM).
+  return typeof value === "string" && Array.from(value).length >= 1 && Array.from(value).length <= 2000 &&
+    /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(value) &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+}
+
+export class JsonBodyError extends Error {}
+
+// Count actual decoded-body bytes, never trust Content-Length or parse a prefix.
+// Cancellation also terminates a pending body read; listeners are always removed.
+export async function readBoundedJson(body: ReadableStream<Uint8Array> | null, maximum: number, signal?: AbortSignal): Promise<unknown> {
+  if (!body) throw new JsonBodyError("Missing JSON body");
+  const reader = body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    signal?.throwIfAborted();
+    while (true) {
+      const part = await reader.read();
+      signal?.throwIfAborted();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > maximum) { cancel(); throw new JsonBodyError("JSON body exceeds limit"); }
+      chunks.push(part.value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
+    catch (error) {
+      if (error instanceof SyntaxError || error instanceof TypeError) throw new JsonBodyError("Invalid JSON body");
+      throw error;
+    }
+  } finally {
+    if (signal?.aborted) cancel();
+    signal?.removeEventListener("abort", cancel);
+    reader.releaseLock();
+  }
+}
+
+function askAnswer(value: unknown): AskAnswer | null {
+  if (!object(value) || typeof value.answer !== "string" || !Array.isArray(value.citations) || value.citations.length > 10) return null;
+  const seen = new Set<number>();
+  const citations: AskAnswer["citations"] = [];
+  for (const item of value.citations) {
+    if (!object(item) || typeof item.evidence_id !== "number" || !Number.isSafeInteger(item.evidence_id) ||
+        item.evidence_id < 1 || item.evidence_id > 10 || seen.has(item.evidence_id) ||
+        typeof item.repository_name !== "string" || !item.repository_name.trim() ||
+        typeof item.path !== "string" || !item.path.trim() ||
+        (item.symbol_name !== null && typeof item.symbol_name !== "string") ||
+        typeof item.start_line !== "number" || !Number.isSafeInteger(item.start_line) || item.start_line < 1 ||
+        typeof item.end_line !== "number" || !Number.isSafeInteger(item.end_line) || item.end_line < item.start_line) return null;
+    seen.add(item.evidence_id);
+    citations.push({ evidence_id: item.evidence_id, repository_name: item.repository_name, path: item.path,
+      symbol_name: item.symbol_name, start_line: item.start_line, end_line: item.end_line });
+  }
+  return { answer: value.answer, citations };
+}
+
+export async function askRepository(repositoryId: string, question: string, signal?: AbortSignal): Promise<
+  { ok: true; data: AskAnswer } | { ok: false; error: AskError }
+> {
+  if (!validUuid(repositoryId) || !validQuestion(question)) return { ok: false, error: "invalid" };
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(new DOMException("Ask timeout", "TimeoutError")), 180_000);
+  const combined = AbortSignal.any(signal ? [signal, timeout.signal] : [timeout.signal]);
+  try {
+    combined.throwIfAborted();
+    const response = await fetch(`${backendOrigin()}/ask`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repository_id: repositoryId.toLowerCase(), q: question }),
+      cache: "no-store", redirect: "error", signal: combined,
+    });
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {});
+      const mapping: Record<number, AskError> = { 404: "not_found", 422: "invalid", 502: "provider", 503: "unavailable", 504: "timeout" };
+      return { ok: false, error: mapping[response.status] ?? "failed" };
+    }
+    const data = askAnswer(await readBoundedJson(response.body, 1024 * 1024, combined));
+    return data ? { ok: true, data } : { ok: false, error: "response" };
+  } catch (error) {
+    if (signal?.aborted) return { ok: false, error: "cancelled" };
+    if (timeout.signal.aborted || (error instanceof DOMException && error.name === "TimeoutError")) return { ok: false, error: "timeout" };
+    if (error instanceof JsonBodyError) return { ok: false, error: "response" };
+    if (isTransportFailure(error)) return { ok: false, error: "network" };
+    throw error;
+  } finally { clearTimeout(timer); }
+}

@@ -584,7 +584,8 @@ HTTPS URLs and the list shows the latest 100 registrations. Registration does no
 verify repository existence, public accessibility or cloneability, and does not
 start indexing automatically. Use **Index repository** explicitly; completed
 repositories offer **Reindex repository**, and failed runs offer **Try indexing
-again**. No search or Q&A UI is included yet.
+again**. Ready repositories offer **Ask about this repository**. No separate
+raw search interface is included.
 
 The form submits through a Next.js Server Action; backend configuration stays
 server-only. Registration and list requests have a five-second timeout and no
@@ -619,6 +620,26 @@ Failed jobs display generic feedback, not logs or invented failure reasons:
 are not persisted. In-process BackgroundTasks remain non-durable: abrupt backend
 termination can leave pending/running jobs indefinitely. Polling/reloading does
 not recover them; there is no automatic stale-job recovery or durable queue.
+
+The selected Q&A workspace sends one independent question to the existing
+grounded `/ask` pipeline. It is enabled only for a currently known completed run
+with searchable code units and no stale status or unresolved indexing request.
+Nonempty evidence requires the backend's local Ollama provider and configured
+`qwen2.5-coder:3b` model. Answers render as escaped plain text, preserving textual
+evidence markers; only a noninteractive **Sources returned** count is shown.
+There is no token streaming, answer cache, conversation persistence, or prior-turn
+context. Empty evidence is a valid insufficient-evidence answer, not a UI error.
+
+Ask requests have a 180-second downstream timeout and a 190-second browser
+timeout; deployment limits may terminate requests sooner. The Next route accepts
+at most 32 KiB of JSON and rejects backend responses larger than 1 MiB rather
+than displaying partial answers. Browser fetch metadata rejects cross-origin
+requests; when absent, strict JSON and no CORS retain the browser boundary.
+No brittle public-origin comparison or forwarded-host trust is added; this is
+not authentication. Switching repositories, losing
+readiness, or navigating away stops waiting and suppresses stale results, but
+does not guarantee that backend/Ollama computation stops. Requests are never
+automatically retried. The UI does not claim which index snapshot an answer used.
 
 Frontend checks:
 
