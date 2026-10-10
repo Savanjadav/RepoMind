@@ -3,6 +3,7 @@ import runpy
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import UUID, uuid4
 
@@ -36,6 +37,97 @@ from app.rag_context import ContextEvidence
 from app.reranking_provider import RerankerUnavailableError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+@pytest.mark.parametrize(
+    ("content", "expected", "truncated"),
+    [
+        ("", "", False),
+        (
+            "  café 😀\r\n<script>x</script>\n",
+            "  café 😀\r\n<script>x</script>\n",
+            False,
+        ),
+        ("😀" * 4000, "😀" * 4000, False),
+        ("😀" * 4001, "😀" * 4000, True),
+        ("x\n" * 100, "x\n" * 100, False),
+        ("x\n" * 99 + "last", "x\n" * 99 + "last", False),
+        ("x\n" * 100 + "last", "x\n" * 100, True),
+        ("x\r\n" * 101, "x\r\n" * 100, True),
+        ("\n" * 101, "\n" * 100, True),
+        ("x" * 3999 + "\r\n", "x" * 3999 + "\r", True),
+        ("x\n" * 99 + "😀" * 4000, "x\n" * 99 + "😀" * 3802, True),
+        ("x\r" * 101, "x\r" * 101, False),
+    ],
+)
+def test_indexed_source_preview_bounds(
+    content: str, expected: str, truncated: bool
+) -> None:
+    assert ask_api._indexed_source_preview(content) == (expected, truncated)
+
+
+@pytest.mark.parametrize("context_mode", ["complete", "partial", "metadata_only"])
+def test_preview_ids_map_to_included_positions_not_citation_order_or_metadata(
+    api_context: "ApiContext", monkeypatch: pytest.MonkeyPatch, context_mode: str
+) -> None:
+    repository = _repository(api_context)
+    # Deliberately identical metadata, but different indexed source content.
+    evidence = [
+        ContextEvidence(repository.name, "same.py", None, 1, 1, content)
+        for content in ("first indexed source", "second indexed source")
+    ]
+    first_size = len(ask_api.format_context(evidence[:1], max_characters=8000).text)
+    metadata_budget = next(
+        budget
+        for budget in range(first_size, first_size + 1000)
+        if ask_api.format_context(
+            evidence, max_characters=budget
+        ).included_evidence_count
+        == 2
+    )
+    budget = {
+        "complete": 8000,
+        "partial": metadata_budget + 3,
+        "metadata_only": metadata_budget,
+    }[context_mode]
+    monkeypatch.setattr(ask_api, "ASK_CONTEXT_MAX_CHARACTERS", budget)
+    retrieval = Mock(
+        return_value=[
+            SimpleNamespace(
+                path=item.path,
+                symbol_name=item.symbol_name,
+                start_line=item.start_line,
+                end_line=item.end_line,
+                content=item.content,
+            )
+            for item in evidence
+        ]
+    )
+    monkeypatch.setattr(ask_api, "search_code_units_with_dependencies", retrieval)
+    provider = MockLLMProvider(
+        response="[Evidence 2] [Evidence 99] [Evidence 1] [Evidence 2]"
+    )
+    app.dependency_overrides[ask_api.get_llm_provider] = lambda: provider
+    response = api_context.client.post("/ask", json=_body(repository.id))
+    assert response.status_code == 200
+    assert (
+        response.json()["answer"]
+        == "[Evidence 2] [Evidence 99] [Evidence 1] [Evidence 2]"
+    )
+    citations = response.json()["citations"]
+    assert [item["evidence_id"] for item in citations] == [2, 1]
+    assert [item["source_preview"] for item in citations] == [
+        "second indexed source",
+        "first indexed source",
+    ]
+    assert all(item["source_preview_truncated"] is False for item in citations)
+    assert len(provider.calls) == 1
+    retrieval.assert_called_once()
+    assert len(api_context.embedding.calls) == 1
+    if context_mode != "complete":
+        # The preview is indexed source, NOT necessarily the LLM context slice.
+        assert "second indexed source" not in provider.calls[0][1].content
+        assert "[TRUNCATED]" in provider.calls[0][1].content
 
 
 def _vector() -> list[float]:
@@ -193,6 +285,8 @@ def test_real_pipeline_preserves_order_mapping_and_response(
                 "symbol_name": None,
                 "start_line": 12,
                 "end_line": 14,
+                "source_preview": "  café\r\n",
+                "source_preview_truncated": False,
             }
         ],
     }
@@ -620,6 +714,8 @@ def test_api_citation_mapping(
                 "symbol_name": None if index == 1 else "authenticate",
                 "start_line": 12,
                 "end_line": 14,
+                "source_preview": "def authenticate():\n    return True\n",
+                "source_preview_truncated": False,
             }
             for index in ids
         ],
@@ -657,6 +753,8 @@ def test_api_only_maps_included_truncated_prefix(
                 "symbol_name": "authenticate",
                 "start_line": 12,
                 "end_line": 14,
+                "source_preview": "x" * 4000,
+                "source_preview_truncated": True,
             }
         ],
     }
@@ -751,6 +849,8 @@ def test_citation_integrity_against_included_and_persisted_evidence(
             "symbol_name": item.symbol_name,
             "start_line": item.start_line,
             "end_line": item.end_line,
+            "source_preview": item.content[:4000],
+            "source_preview_truncated": len(item.content) > 4000,
         }
         unit = persisted_by_id[evidence_id]
         api_context.session.refresh(unit)
@@ -849,6 +949,8 @@ def test_dependency_flow_reaches_context_and_citations(
                 "symbol_name": "service_function",
                 "start_line": 4,
                 "end_line": 4,
+                "source_preview": evidence[2].content,
+                "source_preview_truncated": False,
             }
         ],
     }

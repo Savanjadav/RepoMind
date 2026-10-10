@@ -24,6 +24,8 @@ from app.reranking_provider import RerankingProvider
 from app.search_api import get_embedding_provider
 
 ASK_CONTEXT_MAX_CHARACTERS = 8_000
+SOURCE_PREVIEW_MAX_CHARACTERS = 4_000
+SOURCE_PREVIEW_MAX_LINES = 100
 _DEFAULT_LLM_MODEL = "qwen2.5-coder:3b"
 
 router = APIRouter()
@@ -57,6 +59,23 @@ class CitationResponse(BaseModel):
     symbol_name: str | None
     start_line: int
     end_line: int
+    source_preview: str
+    source_preview_truncated: bool
+
+
+def _indexed_source_preview(content: str) -> tuple[str, bool]:
+    """Return a bounded indexed-source prefix, not the formatted LLM context slice."""
+    preview = content[:SOURCE_PREVIEW_MAX_CHARACTERS]
+    # LF matches parser line accounting; preserve CRLF and a final newline.
+    end = 0
+    for _ in range(SOURCE_PREVIEW_MAX_LINES):
+        newline = preview.find("\n", end)
+        if newline < 0:
+            break
+        end = newline + 1
+    else:
+        preview = preview[:end]
+    return preview, len(preview) < len(content)
 
 
 class AskResponse(BaseModel):
@@ -118,6 +137,9 @@ def ask(
     ]
     context = format_context(evidence, max_characters=ASK_CONTEXT_MAX_CHARACTERS)
     included_evidence = tuple(evidence[: context.included_evidence_count])
+    # format_context/extract_citations share one-based included-prefix IDs.
+    # Keep original indexed content: the LLM context may contain a shorter slice.
+    evidence_by_id = dict(enumerate(included_evidence, start=1))
     try:
         response = generate_grounded_answer(
             llm_provider, question=request.q, context=context
@@ -139,9 +161,12 @@ def ask(
             status_code=502, detail="Language model request failed"
         ) from error
     citations = extract_citations(response.content, included_evidence=included_evidence)
-    return AskResponse(
-        answer=response.content,
-        citations=[
+    citation_responses = []
+    for citation in citations:
+        preview, truncated = _indexed_source_preview(
+            evidence_by_id[citation.evidence_id].content
+        )
+        citation_responses.append(
             CitationResponse(
                 evidence_id=citation.evidence_id,
                 repository_name=citation.repository_name,
@@ -149,7 +174,11 @@ def ask(
                 symbol_name=citation.symbol_name,
                 start_line=citation.start_line,
                 end_line=citation.end_line,
+                source_preview=preview,
+                source_preview_truncated=truncated,
             )
-            for citation in citations
-        ],
+        )
+    return AskResponse(
+        answer=response.content,
+        citations=citation_responses,
     )

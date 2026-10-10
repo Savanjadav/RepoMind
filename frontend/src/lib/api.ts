@@ -285,6 +285,7 @@ export async function getRepositoryIndexingSummaries(repositoryIds: string[]): P
 export type AskAnswer = { answer: string; citations: {
   evidence_id: number; repository_name: string; path: string; symbol_name: string | null;
   start_line: number; end_line: number;
+  source_preview: string; source_preview_truncated: boolean;
 }[] };
 export type AskError = "invalid" | "not_found" | "unavailable" | "timeout" | "provider" | "network" | "response" | "failed" | "cancelled";
 
@@ -342,10 +343,14 @@ function askAnswer(value: unknown): AskAnswer | null {
         typeof item.path !== "string" || !item.path.trim() ||
         (item.symbol_name !== null && typeof item.symbol_name !== "string") ||
         typeof item.start_line !== "number" || !Number.isSafeInteger(item.start_line) || item.start_line < 1 ||
-        typeof item.end_line !== "number" || !Number.isSafeInteger(item.end_line) || item.end_line < item.start_line) return null;
+        typeof item.end_line !== "number" || !Number.isSafeInteger(item.end_line) || item.end_line < item.start_line ||
+        typeof item.source_preview !== "string" || Array.from(item.source_preview).length > 4000 ||
+        item.source_preview.split("\n").length - (item.source_preview.endsWith("\n") ? 1 : 0) > 100 ||
+        typeof item.source_preview_truncated !== "boolean") return null;
     seen.add(item.evidence_id);
     citations.push({ evidence_id: item.evidence_id, repository_name: item.repository_name, path: item.path,
-      symbol_name: item.symbol_name, start_line: item.start_line, end_line: item.end_line });
+      symbol_name: item.symbol_name, start_line: item.start_line, end_line: item.end_line,
+      source_preview: item.source_preview, source_preview_truncated: item.source_preview_truncated });
   }
   return { answer: value.answer, citations };
 }

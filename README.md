@@ -626,9 +626,29 @@ grounded `/ask` pipeline. It is enabled only for a currently known completed run
 with searchable code units and no stale status or unresolved indexing request.
 Nonempty evidence requires the backend's local Ollama provider and configured
 `qwen2.5-coder:3b` model. Answers render as escaped plain text, preserving textual
-evidence markers; only a noninteractive **Sources returned** count is shown.
+evidence markers. Markers matching structured citations are keyboard-operable
+buttons; unknown markers remain plain text. A source-button list also provides
+access to every returned citation. One inline viewer shows repository-relative
+path, nullable symbol, the original 1-based inclusive cited range, and escaped
+indexed source in a plain-text code block.
 There is no token streaming, answer cache, conversation persistence, or prior-turn
 context. Empty evidence is a valid insufficient-evidence answer, not a UI error.
+
+Each `/ask` citation additionally contains `source_preview` and
+`source_preview_truncated`. The preview is an exact prefix of the indexed
+CodeUnit content, bounded to 4,000 Unicode code points and 100 LF-delimited
+source lines. A final newline is retained; boundary lines may be partial.
+Truncation is labeled separately and does not change the original cited range.
+This is an **indexed-source preview**, not necessarily the context slice seen
+by the LLM: context budgeting may have shown less source, or only metadata.
+It does not prove that every generated claim is semantically supported.
+
+Previews arrive with the answer, with no source-fetch endpoint, filesystem read,
+GitHub fetch, or additional model call. They remain paired with that answer and
+are not a live view after reindexing or a historical snapshot service. A new
+question, repository change, or readiness loss clears the viewer. No source or
+answer history is persisted. Preview text is included only for structured
+citations; the existing 1 MiB frontend response ceiling still applies.
 
 Ask requests have a 180-second downstream timeout and a 190-second browser
 timeout; deployment limits may terminate requests sooner. The Next route accepts

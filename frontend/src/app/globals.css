@@ -37,6 +37,11 @@ h2 { margin: 0 0 1.5rem; font-size: 1rem; }
 .qa textarea { display: block; width: 100%; padding: .75rem; margin-bottom: 1rem; font: inherit; }
 .qa textarea:focus-visible { outline: 2px solid #175540; outline-offset: 3px; }
 .qa-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.citation-marker { font: inherit; color: #175540; background: transparent; border: 0; text-decoration: underline; padding: 0 .15rem; cursor: pointer; }
+.citation-marker:focus-visible, .citation-list button:focus-visible, .citation-panel button:focus-visible { outline: 2px solid #175540; outline-offset: 3px; }
+.citation-list { display: flex; flex-wrap: wrap; gap: .5rem; }
+.citation-panel { margin-top: 1rem; padding: 1rem; border: 1px solid #d3ddd6; }
+.citation-panel pre { overflow: auto; max-height: 28rem; padding: 1rem; background: #f2f5f3; white-space: pre; }
 .retry:disabled { opacity: .65; cursor: wait; }
 @media (max-width: 480px) {
   .shell { margin-top: 3rem; }

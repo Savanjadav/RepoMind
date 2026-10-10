@@ -5,6 +5,8 @@ import { afterEach, beforeEach, test } from "node:test";
 // Node executes TypeScript directly; tsc resolves the same module without suffix.
 const modulePath = "./api.ts";
 const api: typeof import("./api") = await import(modulePath);
+const markerPath = "./citation-markers.ts";
+const { citationMarkers }: typeof import("./citation-markers") = await import(markerPath);
 // Resolve Next's app alias for Node's native runner; still import the real
 // action and GET handler, without copying their validation into the tests.
 const hook = registerHooks({ resolve(specifier, context, nextResolve) {
@@ -282,8 +284,41 @@ test("real GET handler projects validated data and sanitizes failures", async ()
   assert.deepEqual(await missing.json(), { error: "not_found" });
 });
 
-const citation = { evidence_id: 1, repository_name: "repo", path: "a.py", symbol_name: null, start_line: 1, end_line: 2 };
+const citation = { evidence_id: 1, repository_name: "repo", path: "a.py", symbol_name: null, start_line: 1, end_line: 2,
+  source_preview: "const value = '<script>text</script>';\r\n", source_preview_truncated: false };
 const answer = { answer: "  Answer [Evidence 1]\n", citations: [citation] };
+for (const preview of [null, 1, "😀".repeat(4001), "x\n".repeat(100) + "extra"]) {
+  test(`ask rejects invalid indexed preview ${String(preview).slice(0, 20)}`, async () => {
+    respond({ ...answer, citations: [{ ...citation, source_preview: preview }] });
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error: "response" });
+  });
+}
+for (const flag of [undefined, null, 0, "false"]) {
+  test(`ask rejects invalid preview truncation ${String(flag)}`, async () => {
+    respond({ ...answer, citations: [{ ...citation, source_preview_truncated: flag }] });
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: false, error: "response" });
+  });
+}
+for (const preview of ["", " \t\r\n", "😀".repeat(4000), "x\r\n".repeat(100), "x\n".repeat(99) + "last"]) {
+  test(`ask preserves bounded indexed preview ${preview.slice(0, 20)}`, async () => {
+    const data = { ...answer, citations: [{ ...citation, source_preview: preview, source_preview_truncated: true }] };
+    respond(data);
+    assert.deepEqual(await api.askRepository(rid, "q"), { ok: true, data });
+  });
+}
+for (const [text, expected] of [
+  ["[Evidence 1]", [1]], ["[Evidence 1] twice [Evidence 1]", [1, 1]],
+  ["[Evidence 2]\n[Evidence 1]", [2, 1]], ["[Evidence 999]", []],
+  ["[Evidence 01] [Evidence 0] [Evidence -1] [evidence 1] [Evidence 1 ]", []],
+  ["[ordinary] <script>alert(1)</script>\n [Evidence 1]", [1]],
+  ["[Evidence " + "9".repeat(10000) + "] [Evidence 2]", [2]], ["", []],
+] as [string, number[]][]) {
+  test(`marker tokenizer preserves text and structured identity ${text.slice(0, 50)}`, () => {
+    const parts = citationMarkers(text, [1, 2]);
+    assert.equal(parts.map(part => part.text).join(""), text);
+    assert.deepEqual(parts.flatMap(part => part.evidenceId === undefined ? [] : [part.evidenceId]), expected);
+  });
+}
 test("ask uses exact question and fixed POST without retrieval controls", async () => {
   const q = "  Unicode 😀\t\r\nquestion  ";
   respond({ ...answer, secret: "SECRET" });
