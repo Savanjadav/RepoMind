@@ -634,6 +634,34 @@ indexed source in a plain-text code block.
 There is no token streaming, answer cache, conversation persistence, or prior-turn
 context. Empty evidence is a valid insufficient-evidence answer, not a UI error.
 
+The **View repository overview** action is available before Q&A readiness. The
+read-only `GET /repositories/{repository_id}/overview` endpoint reports indexed
+File and CodeUnit counts, named CodeUnits, CodeUnits by language/category and
+kind, and the latest indexing attempt. These fields come from one PostgreSQL
+statement snapshot, without loading source content or embeddings. A canonical
+decimal-string `index_generation` preserves BIGINT precision; it identifies
+snapshot changes, not the number of successful indexing attempts.
+
+Language/category counts use stored CodeUnit labels: python, javascript,
+typescript, documentation and config; other stored languages share one `other`
+bucket. These are **code-unit counts, not files by language**. Kind counts use
+class, config, document, function and import. Named CodeUnits have a non-null
+symbol and may repeat names or represent documentation sections; they are not a
+unique-symbol inventory. Files may exist without CodeUnits, and excluded or
+unsupported source is not evidence of complete repository coverage.
+
+The overview separates the latest attempt from currently persisted indexed
+data: pending, running or failed reindexing can coexist with an earlier snapshot.
+This does not relax Q&A readiness. Selection, relevant observed indexing
+transitions, and explicit refresh actions update the overview through the
+existing status coordinator; unchanged polls do not trigger overview requests.
+There is no second polling loop or historical snapshot dashboard. Data is
+last-observed, not live monitoring; external changes require an existing status
+observation or manual refresh. Loading/error states never invent zero counts.
+The fixed same-origin Next handler validates a bounded 64 KiB response, uses
+no-store requests and a five-second downstream timeout (seven seconds in the
+browser). No Redis or model is needed for overview reads.
+
 Each `/ask` citation additionally contains `source_preview` and
 `source_preview_truncated`. The preview is an exact prefix of the indexed
 CodeUnit content, bounded to 4,000 Unicode code points and 100 LF-delimited

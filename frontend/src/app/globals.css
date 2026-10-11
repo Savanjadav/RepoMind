@@ -42,6 +42,13 @@ h2 { margin: 0 0 1.5rem; font-size: 1rem; }
 .citation-list { display: flex; flex-wrap: wrap; gap: .5rem; }
 .citation-panel { margin-top: 1rem; padding: 1rem; border: 1px solid #d3ddd6; }
 .citation-panel pre { overflow: auto; max-height: 28rem; padding: 1rem; background: #f2f5f3; white-space: pre; }
+.overview { margin-top: 2rem; border-top: 1px solid #d3ddd6; padding-top: 1rem; }
+.repositories .retry + .retry { margin-inline-start: .75rem; }
+.overview-counts, .overview-tables { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+.overview-counts dd { margin: .5rem 0; font-size: 1.5rem; }
+.overview table { border-collapse: collapse; text-align: left; }
+.overview caption { text-align: left; font-weight: 600; margin-bottom: .5rem; }
+.overview th, .overview td { padding: .4rem .8rem; border-bottom: 1px solid #d3ddd6; }
 .retry:disabled { opacity: .65; cursor: wait; }
 @media (max-width: 480px) {
   .shell { margin-top: 3rem; }

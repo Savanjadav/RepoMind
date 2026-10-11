@@ -287,6 +287,78 @@ export type AskAnswer = { answer: string; citations: {
   start_line: number; end_line: number;
   source_preview: string; source_preview_truncated: boolean;
 }[] };
+
+export type RepositoryOverview = {
+  repository_id: string;
+  index_generation: string;
+  latest_job: IndexingSummary["latest_job"];
+  snapshot_counts: { files: number; code_units: number; named_code_units: number };
+  code_units_by_language: { language: string; count: number }[];
+  code_units_by_kind: { kind: string; count: number }[];
+};
+
+function overview(value: unknown, id: string): RepositoryOverview | null {
+  if (!object(value) || value.repository_id !== id ||
+      typeof value.index_generation !== "string" || !/^(0|[1-9][0-9]*)$/u.test(value.index_generation) ||
+      value.index_generation.length > 19 ||
+      (value.index_generation.length === 19 && value.index_generation > "9223372036854775807")) return null;
+  const counts = value.snapshot_counts;
+  const nonnegative = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+  if (!object(counts) || !nonnegative(counts.files) || !nonnegative(counts.code_units) ||
+      !nonnegative(counts.named_code_units) || counts.named_code_units > counts.code_units ||
+      (counts.files === 0 && counts.code_units !== 0)) return null;
+  // Reuse the existing job DTO validation without changing its readiness rules.
+  const job = value.latest_job;
+  const validated = summary({ repository_id: id, latest_job: job,
+    snapshot_counts: object(job) && job.status === "completed" ? counts : null });
+  if (!validated) return null;
+  const expectedTotal = counts.code_units;
+  function categories(raw: unknown, key: string, allowed: string[]): Record<string, string | number>[] | null {
+    if (!Array.isArray(raw) || raw.length > allowed.length) return null;
+    const seen = new Set<string>();
+    const result: Record<string, string | number>[] = [];
+    let total = 0;
+    for (const item of raw) {
+      if (!object(item) || typeof item[key] !== "string" || !allowed.includes(item[key]) || seen.has(item[key]) ||
+          !nonnegative(item.count) || item.count === 0) return null;
+      seen.add(item[key]); total += item.count;
+      if (!Number.isSafeInteger(total)) return null;
+      result.push({ [key]: item[key], count: item.count });
+    }
+    return total === expectedTotal ? result : null;
+  }
+  const languages = categories(value.code_units_by_language, "language", ["python", "javascript", "typescript", "documentation", "config", "other"]);
+  const kinds = categories(value.code_units_by_kind, "kind", ["class", "config", "document", "function", "import"]);
+  if (!languages || !kinds) return null;
+  return { repository_id: id, index_generation: value.index_generation, latest_job: validated.latest_job,
+    snapshot_counts: { files: counts.files, code_units: counts.code_units, named_code_units: counts.named_code_units },
+    code_units_by_language: languages.map(item => ({ language: item.language as string, count: item.count as number })),
+    code_units_by_kind: kinds.map(item => ({ kind: item.kind as string, count: item.count as number })) };
+}
+
+export async function getRepositoryOverview(repositoryId: string, signal?: AbortSignal): Promise<
+  { ok: true; data: RepositoryOverview } | { ok: false; error: "invalid" | "not_found" | "unavailable" }
+> {
+  if (!validUuid(repositoryId)) return { ok: false, error: "invalid" };
+  const id = repositoryId.toLowerCase();
+  const timeout = AbortSignal.timeout(5000);
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  let response: Response | undefined;
+  try {
+    response = await fetch(`${backendOrigin()}/repositories/${id}/overview`, {
+      cache: "no-store", redirect: "error", signal: combined,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return { ok: false, error: response.status === 404 ? "not_found" : "unavailable" };
+    }
+    const data = overview(await readBoundedJson(response.body, 64 * 1024, combined), id);
+    return data ? { ok: true, data } : { ok: false, error: "unavailable" };
+  } catch (error) {
+    if (isTransportFailure(error) || error instanceof JsonBodyError) return { ok: false, error: "unavailable" };
+    throw error;
+  }
+}
 export type AskError = "invalid" | "not_found" | "unavailable" | "timeout" | "provider" | "network" | "response" | "failed" | "cancelled";
 
 export function validQuestion(value: unknown): value is string {

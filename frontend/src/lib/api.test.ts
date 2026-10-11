@@ -19,6 +19,8 @@ const actions: typeof import("../app/actions") = await import(actionPath);
 const route: typeof import("../app/api/indexing-summary/route") = await import(routePath);
 const askRoutePath = "../app/api/ask/route.ts";
 const askRoute: typeof import("../app/api/ask/route") = await import(askRoutePath);
+const overviewRoutePath = "../app/api/repository-overview/route.ts";
+const overviewRoute: typeof import("../app/api/repository-overview/route") = await import(overviewRoutePath);
 hook.deregister();
 const originalFetch = globalThis.fetch;
 const originalUrl = process.env.REPOMIND_API_BASE_URL;
@@ -42,6 +44,98 @@ function respond(body: unknown, status = 200) {
     calls.push({ url: String(url), options });
     return Response.json(body, { status });
   };
+}
+
+const overviewData = {
+  repository_id: repository.id, index_generation: "9223372036854775807", latest_job: null,
+  snapshot_counts: { files: 2, code_units: 3, named_code_units: 1 },
+  code_units_by_language: [{ language: "other", count: 2 }, { language: "python", count: 1 }],
+  code_units_by_kind: [{ kind: "function", count: 3 }],
+};
+test("overview fixed route preserves precise generation, projection and no-store", async () => {
+  respond({ ...overviewData, secret: "SECRET" });
+  const response = await overviewRoute.GET(new Request(`http://localhost/api/repository-overview?repository_id=${repository.id}`));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(await response.json(), overviewData);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `http://127.0.0.1:8000/repositories/${repository.id}/overview`);
+  assert.equal(calls[0].options?.cache, "no-store");
+  assert.equal(calls[0].options?.redirect, "error");
+});
+for (const generation of ["0", "12", "9223372036854775807"]) {
+  test(`overview accepts exact generation ${generation}`, async () => {
+    respond({ ...overviewData, index_generation: generation });
+    const result = await api.getRepositoryOverview(repository.id);
+    assert.equal(result.ok && result.data.index_generation, generation);
+  });
+}
+for (const generation of ["-1", "01", "1.5", "abc", "", "9223372036854775808", 12]) {
+  test(`overview rejects generation ${generation}`, async () => {
+    respond({ ...overviewData, index_generation: generation });
+    assert.deepEqual(await api.getRepositoryOverview(repository.id), { ok: false, error: "unavailable" });
+  });
+}
+for (const change of [
+  { snapshot_counts: { files: -1, code_units: 3, named_code_units: 1 } },
+  { snapshot_counts: { files: 1, code_units: 1.5, named_code_units: 1 } },
+  { snapshot_counts: { files: 1, code_units: 3, named_code_units: 4 } },
+  { snapshot_counts: { files: 0, code_units: 3, named_code_units: 1 } },
+  { snapshot_counts: { files: Number.MAX_SAFE_INTEGER + 1, code_units: 3, named_code_units: 1 } },
+  { code_units_by_language: [{ language: "other", count: 1 }, { language: "other", count: 2 }] },
+  { code_units_by_language: [{ language: "rust", count: 3 }] },
+  { code_units_by_language: [{ language: "python", count: 2 }] },
+  { code_units_by_kind: [{ kind: "method", count: 3 }] },
+  { code_units_by_kind: [{ kind: "function", count: -3 }] },
+  { latest_job: { job_id: repository.id, status: "unknown", created_at: repository.created_at } },
+  { repository_id: "00000000-0000-0000-0000-000000000000" },
+]) {
+  test(`overview rejects malformed aggregate ${JSON.stringify(change)}`, async () => {
+    respond({ ...overviewData, ...change });
+    assert.deepEqual(await api.getRepositoryOverview(repository.id), { ok: false, error: "unavailable" });
+  });
+}
+for (const status of ["pending", "running", "completed", "failed"]) {
+  test(`overview retains indexed data with ${status} latest job`, async () => {
+    const data = { ...overviewData, latest_job: { job_id: repository.id, status, created_at: repository.created_at } };
+    respond(data);
+    assert.deepEqual(await api.getRepositoryOverview(repository.id), { ok: true, data });
+  });
+}
+test("overview empty aggregates are valid", async () => {
+  const data = { ...overviewData, snapshot_counts: { files: 0, code_units: 0, named_code_units: 0 }, code_units_by_language: [], code_units_by_kind: [] };
+  respond(data);
+  assert.deepEqual(await api.getRepositoryOverview(repository.id), { ok: true, data });
+});
+for (const query of ["", "repository_id=bad", `repository_id=${repository.id}&repository_id=${repository.id}`, `repository_id=${repository.id}&url=http://remote`]) {
+  test(`overview route rejects invalid query ${query}`, async () => {
+    respond(overviewData);
+    assert.equal((await overviewRoute.GET(new Request(`http://localhost/api/repository-overview?${query}`))).status, 400);
+    assert.equal(calls.length, 0);
+  });
+}
+for (const status of [404, 500, 503]) {
+  test(`overview sanitizes HTTP ${status} without retry`, async () => {
+    respond({ secret: "SECRET" }, status);
+    const result = await overviewRoute.GET(new Request(`http://localhost/api/repository-overview?repository_id=${repository.id}`));
+    assert.equal(result.status, status === 404 ? 404 : 503);
+    assert.deepEqual(await result.json(), { error: status === 404 ? "not_found" : "unavailable" });
+    assert.equal(calls.length, 1);
+  });
+}
+test("overview rejects oversized body and invalid UUID", async () => {
+  respond({ ...overviewData, padding: "x".repeat(64 * 1024) });
+  assert.deepEqual(await api.getRepositoryOverview(repository.id), { ok: false, error: "unavailable" });
+  assert.deepEqual(await api.getRepositoryOverview("bad"), { ok: false, error: "invalid" });
+  assert.equal(calls.length, 1);
+});
+for (const error of [new TypeError("SECRET network"), new DOMException("SECRET", "TimeoutError")]) {
+  test(`overview sanitizes ${error.name} without retry`, async () => {
+    let count = 0;
+    globalThis.fetch = async () => { count++; throw error; };
+    assert.deepEqual(await api.getRepositoryOverview(repository.id), { ok: false, error: "unavailable" });
+    assert.equal(count, 1);
+  });
 }
 
 test("registration sends source as data to a fixed endpoint, once", async () => {

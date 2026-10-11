@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { startIndexing, type IndexingSummary, type Repository } from "./actions";
 import RepositoryQA from "./repository-qa";
+import RepositoryOverview from "./repository-overview";
 
 type Operation = {
   sending: boolean;
@@ -16,6 +17,7 @@ type View = {
   readinessRefresh: Record<string, true>;
   warning: string;
   reading: boolean;
+  overviewRevision: number;
 };
 
 export default function RepositoryIndexing({ repositories, initial }: {
@@ -25,7 +27,7 @@ export default function RepositoryIndexing({ repositories, initial }: {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>(() => ({
     summaries: Object.fromEntries((initial ?? []).map((item) => [item.repository_id, item])),
-    operations: {}, readinessRefresh: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false,
+    operations: {}, readinessRefresh: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false, overviewRevision: 0,
   }));
   const controls = useRef<{ refresh: () => void; start: (id: string, form: FormData) => void } | null>(null);
 
@@ -34,7 +36,7 @@ export default function RepositoryIndexing({ repositories, initial }: {
     // keys this component by its server snapshot so new props get fresh state.
     let state: View = {
       summaries: Object.fromEntries((initial ?? []).map((item) => [item.repository_id, item])),
-      operations: {}, readinessRefresh: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false,
+      operations: {}, readinessRefresh: {}, warning: initial === null ? "Status unavailable. Refresh status to try again." : "", reading: false, overviewRevision: 0,
     };
     let alive = true;
     let epoch = 0;
@@ -152,7 +154,11 @@ export default function RepositoryIndexing({ repositories, initial }: {
       if (awaiting || result.status === "conflict") refresh([id]);
       else schedule();
     }
-    controls.current = { refresh: () => refresh(repositories.map((repo) => repo.id)), start: (id, form) => { void start(id, form); } };
+    controls.current = { refresh: () => {
+      state = { ...state, overviewRevision: state.overviewRevision + 1 };
+      publish();
+      refresh(repositories.map((repo) => repo.id));
+    }, start: (id, form) => { void start(id, form); } };
     const visibility = () => {
       if (document.hidden) invalidateRead();
       else { activeIds().forEach((id) => queued.add(id)); schedule(); }
@@ -210,11 +216,16 @@ export default function RepositoryIndexing({ repositories, initial }: {
             </button>
           </form>
           <p role="status" aria-live="polite">{operation?.message ?? ""}</p>
+          <button className="retry" type="button" onClick={() => setSelectedId(repo.id)}>View repository overview</button>
           <button className="retry" type="button" disabled={Boolean(readiness(repo.id))} onClick={() => setSelectedId(repo.id)}>Ask about this repository</button>
           {readiness(repo.id) && <p className="detail">{readiness(repo.id)}</p>}
         </li>;
       })}
     </ul>
+    {selected && <RepositoryOverview key={selected.id} repositoryId={selected.id} name={selected.name}
+      revision={JSON.stringify([view.overviewRevision, view.summaries[selected.id]?.latest_job?.job_id,
+        view.summaries[selected.id]?.latest_job?.status, Boolean(view.operations[selected.id]?.sending),
+        view.operations[selected.id]?.awaiting ?? null, Boolean(view.readinessRefresh[selected.id])])} />}
     {selected && <RepositoryQA key={`${selected.id}:${readiness(selected.id)}`} repositoryId={selected.id} name={selected.name} disabledReason={readiness(selected.id)} />}
   </>;
 }
