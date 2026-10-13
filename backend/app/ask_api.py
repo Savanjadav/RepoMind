@@ -17,6 +17,7 @@ from app.llm_provider import (
     LLMTimeoutError,
     LLMUnavailableError,
 )
+from app.metrics import retrieval
 from app.models.code_unit import EMBEDDING_DIMENSION
 from app.models.repository import Repository
 from app.rag_context import ContextEvidence, format_context
@@ -108,22 +109,23 @@ def ask(
     if repository is None:
         raise HTTPException(status_code=404, detail="Repository not found")
 
-    embedding_provider = get_embedding_provider()
-    if embedding_provider.dimension != EMBEDDING_DIMENSION:
-        raise RuntimeError("Embedding provider dimension does not match storage")
-    vectors = embedding_provider.embed([request.q])
-    if len(vectors) != 1:
-        raise RuntimeError("Embedding provider returned an unexpected vector count")
+    with retrieval("ask_dependency"):
+        embedding_provider = get_embedding_provider()
+        if embedding_provider.dimension != EMBEDDING_DIMENSION:
+            raise RuntimeError("Embedding provider dimension does not match storage")
+        vectors = embedding_provider.embed([request.q])
+        if len(vectors) != 1:
+            raise RuntimeError("Embedding provider returned an unexpected vector count")
 
-    results = search_code_units_with_dependencies(
-        session,
-        repository_id=request.repository_id,
-        query=request.q,
-        query_vector=vectors[0],
-        reranker=reranker,
-        limit=request.limit,
-        filters=None,
-    )
+        results = search_code_units_with_dependencies(
+            session,
+            repository_id=request.repository_id,
+            query=request.q,
+            query_vector=vectors[0],
+            reranker=reranker,
+            limit=request.limit,
+            filters=None,
+        )
     evidence = [
         ContextEvidence(
             repository_name=repository.name,

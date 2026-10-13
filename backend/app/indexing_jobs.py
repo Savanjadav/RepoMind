@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_application_session_factory
 from app.embedding_provider import EmbeddingProvider
+from app.metrics import indexing_execution
 from app.models.indexing_job import IndexingJob
 from app.models.repository import Repository
 from app.repository_clone import RepositoryCloneError, _require_github_https_source
@@ -162,18 +163,19 @@ def run_indexing_job(job_id: UUID) -> None:
         if repository_id is None:
             return
 
-        provider = get_indexing_embedding_provider()
-        with factory() as session:
-            # Workspace cleanup must succeed BEFORE the snapshot commit too.
-            with TemporaryDirectory(prefix="repomind-indexing-") as workspace:
-                execute_reserved_indexing_job(
-                    session,
-                    repository_id=repository_id,
-                    job_id=job_id,
-                    embedding_provider=provider,
-                    workspace_root=Path(workspace),
-                )
-            session.commit()
+        with indexing_execution("background"):
+            provider = get_indexing_embedding_provider()
+            with factory() as session:
+                # Workspace cleanup must succeed BEFORE the snapshot commit too.
+                with TemporaryDirectory(prefix="repomind-indexing-") as workspace:
+                    execute_reserved_indexing_job(
+                        session,
+                        repository_id=repository_id,
+                        job_id=job_id,
+                        embedding_provider=provider,
+                        workspace_root=Path(workspace),
+                    )
+                session.commit()
     except Exception as error:
         # Session contexts roll back before a separate failure update. This is
         # the background execution boundary, not a retry or error reclassification.

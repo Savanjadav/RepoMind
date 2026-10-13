@@ -4,6 +4,7 @@ from app.ask_api import router as ask_router
 from app.code_unit_api import router as code_unit_router
 from app.impact_api import router as impact_router
 from app.indexing_api import router as indexing_router
+from app.metrics import get_metrics, install_metrics
 from app.repository_api import router as repository_router
 from app.repository_overview_api import router as repository_overview_router
 from app.search_api import router as search_router
@@ -21,3 +22,6 @@ app.include_router(repository_overview_router)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+install_metrics(app, get_metrics())

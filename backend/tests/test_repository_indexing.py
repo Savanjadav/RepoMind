@@ -14,6 +14,7 @@ from app.code_unit_persistence import persist_code_units
 from app.database import create_database_engine
 from app.embedding_provider import EmbeddingProvider
 from app.import_relationships import ImportReference
+from app.metrics import Metrics, use_metrics
 from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
@@ -26,6 +27,13 @@ from app.repository_indexing import RepositoryIndexingError, index_repository
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 GITHUB_SOURCE = "https://github.com/example/project.git"
+
+
+@pytest.fixture
+def metrics() -> Iterator[Metrics]:
+    value = Metrics()
+    with use_metrics(value):
+        yield value
 
 
 @pytest.fixture
@@ -851,6 +859,7 @@ def test_indexing_and_cleanup_failure_preserves_primary_error_and_rolls_back(
 def test_pipeline_does_not_commit_and_caller_can_roll_back_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    metrics: Metrics,
 ) -> None:
     if DATABASE_URL is None:
         pytest.skip("DATABASE_URL is not configured")
@@ -884,6 +893,120 @@ def test_pipeline_does_not_commit_and_caller_can_roll_back_success(
     with Session(engine) as verification_session:
         assert verification_session.get(Repository, repository_id) is None
     engine.dispose()
+    # Service success is measured even though the caller discarded all DB work.
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "direct", "outcome": "success"},
+        )
+        == 1
+    )
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_files_hashed_total") == 1
+    )
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_code_units_parsed_total")
+        == 1
+    )
+
+
+@pytest.mark.parametrize("collector_failure", [False, True])
+def test_work_metrics_count_hashes_but_not_reused_units(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metrics: Metrics,
+    collector_failure: bool,
+) -> None:
+    repository = _repository(database_session)
+    _install_offline_clone(monkeypatch, {"a.py": b"def helper(): return 1\n"})
+    if collector_failure:
+
+        def broken(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("telemetry only")
+
+        monkeypatch.setattr(metrics.files_hashed, "inc", broken)
+        monkeypatch.setattr(metrics.units_parsed, "inc", broken)
+        monkeypatch.setattr(metrics.indexing_duration, "labels", broken)
+        monkeypatch.setattr(metrics.indexing_executions, "labels", broken)
+    first = _index(
+        database_session, repository, FakeEmbeddingProvider(), tmp_path / "first"
+    )
+    ids = list(
+        database_session.scalars(
+            select(File.id).where(File.repository_id == repository.id)
+        )
+    )
+    second = _index(
+        database_session, repository, FakeEmbeddingProvider(), tmp_path / "second"
+    )
+    assert first.status == second.status == "completed"
+    assert (
+        list(
+            database_session.scalars(
+                select(File.id).where(File.repository_id == repository.id)
+            )
+        )
+        == ids
+    )
+    if not collector_failure:
+        assert (
+            metrics.registry.get_sample_value("repomind_indexing_files_hashed_total")
+            == 2
+        )
+        assert (
+            metrics.registry.get_sample_value(
+                "repomind_indexing_code_units_parsed_total"
+            )
+            == 1
+        )
+        assert (
+            metrics.registry.get_sample_value(
+                "repomind_indexing_executions_total",
+                {"mode": "direct", "outcome": "success"},
+            )
+            == 2
+        )
+
+
+def test_failed_direct_execution_keeps_work_metrics(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metrics: Metrics,
+) -> None:
+    repository = _repository(database_session)
+    _install_offline_clone(monkeypatch, {"a.py": b"def helper(): return 1\n"})
+    error = RuntimeError("embedding failed")
+    with pytest.raises(RuntimeError) as caught:
+        _index(
+            database_session,
+            repository,
+            FakeEmbeddingProvider(failure=error),
+            tmp_path / "workspace",
+        )
+    assert caught.value is error
+    assert (
+        list(
+            database_session.scalars(
+                select(File).where(File.repository_id == repository.id)
+            )
+        )
+        == []
+    )
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_files_hashed_total") == 1
+    )
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_code_units_parsed_total")
+        == 1
+    )
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total", {"mode": "direct", "outcome": "error"}
+        )
+        == 1
+    )
 
 
 def test_caller_can_commit_failed_status_without_partial_derived_data(

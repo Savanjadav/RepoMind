@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app import indexing_jobs as jobs
 from app import repository_indexing as indexing
 from app.database import create_database_engine, create_session_factory
+from app.metrics import Metrics, use_metrics
 from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import CodeUnit
 from app.models.file import File
@@ -29,6 +30,13 @@ from app.models.repository import Repository
 from app.redis_cache import RedisCache
 from app.repository_clone import ClonedRepository
 from app.search_api import search
+
+
+@pytest.fixture
+def metrics() -> Iterator[Metrics]:
+    value = Metrics()
+    with use_metrics(value):
+        yield value
 
 
 class FakeProvider:
@@ -203,10 +211,21 @@ def test_reservation_lock_and_commit_visibility(state: State) -> None:
             jobs.reserve_indexing_job(contender, state.ids[0])
 
 
-def test_runner_uses_exact_job_and_commits_visible_running(state: State) -> None:
+def test_runner_uses_exact_job_and_commits_visible_running(
+    state: State, metrics: Metrics
+) -> None:
     assert state.generation() == 0
     job_id = state.reserve()
+    labels = {"mode": "background", "outcome": "success"}
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_executions_total", labels)
+        is None
+    )
     jobs.run_indexing_job(job_id)
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_executions_total", labels)
+        == 1
+    )
     assert state.observed == ["running"]
     assert state.status(job_id) == "completed"
     assert state.generation() == 1
@@ -215,6 +234,10 @@ def test_runner_uses_exact_job_and_commits_visible_running(state: State) -> None
     assert state.provider.calls
     assert all(not p.exists() and not p.parent.exists() for p in state.clones)
     jobs.run_indexing_job(job_id)
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_executions_total", labels)
+        == 1
+    )
     assert len(state.clones) == 1
     with state.factory() as session:
         assert list(
@@ -227,6 +250,17 @@ def test_runner_uses_exact_job_and_commits_visible_running(state: State) -> None
     assert state.provider.calls == []
     assert snapshot(state) == before
     assert state.generation() == 1
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_executions_total", labels)
+        == 2
+    )
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_files_hashed_total") == 4
+    )
+    assert (
+        metrics.registry.get_sample_value("repomind_indexing_code_units_parsed_total")
+        == 3  # import unit plus the two functions, not counted again on reuse
+    )
 
 
 @pytest.mark.parametrize("status", ["running", "completed", "failed", "missing"])
@@ -268,6 +302,7 @@ def test_background_failure_preserves_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     phase: str,
+    metrics: Metrics,
 ) -> None:
     first = state.reserve()
     jobs.run_indexing_job(first)
@@ -337,6 +372,58 @@ def test_background_failure_preserves_snapshot(
     assert snapshot(state) == before
     assert state.generation() == 1
     assert "SECRET" not in caplog.text and "PRIVATE SOURCE" not in caplog.text
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "background", "outcome": "success"},
+        )
+        == 1
+    )
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "background", "outcome": "error"},
+        )
+        == 1
+    )
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_duration_seconds_count",
+            {"mode": "background", "outcome": "error"},
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("execution_fails", [False, True])
+def test_collector_failure_cannot_change_background_transaction(
+    state: State,
+    metrics: Metrics,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_fails: bool,
+) -> None:
+    jobs.run_indexing_job(state.reserve())
+    before = snapshot(state)
+    assert all(before.values())
+    state.files["service.py"] = b"def helper(): return 42\n"
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("telemetry failed")
+
+    monkeypatch.setattr(metrics.indexing_executions, "labels", broken)
+    monkeypatch.setattr(metrics.indexing_duration, "labels", broken)
+    monkeypatch.setattr(metrics.files_hashed, "inc", broken)
+    monkeypatch.setattr(metrics.units_parsed, "inc", broken)
+    if execution_fails:
+        monkeypatch.setattr(
+            state.provider, "embed", Mock(side_effect=ValueError("application error"))
+        )
+    job_id = state.reserve()
+    jobs.run_indexing_job(job_id)
+    assert state.status(job_id) == ("failed" if execution_fails else "completed")
+    assert (snapshot(state) == before) is execution_fails
+    assert state.generation() == (1 if execution_fails else 2)
+    assert all(not p.exists() and not p.parent.exists() for p in state.clones)
 
 
 def test_failure_update_does_not_overwrite_completed(state: State) -> None:
@@ -454,7 +541,7 @@ def test_provider_initialization_is_cached_and_synchronized(
 
 
 def test_failed_claim_commit_does_not_execute(
-    state: State, monkeypatch: pytest.MonkeyPatch
+    state: State, monkeypatch: pytest.MonkeyPatch, metrics: Metrics
 ) -> None:
     job_id = state.reserve()
 
@@ -470,11 +557,25 @@ def test_failed_claim_commit_does_not_execute(
     jobs.run_indexing_job(job_id)
     assert state.status(job_id) == "pending"
     assert state.clones == []
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "background", "outcome": "success"},
+        )
+        is None
+    )
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "background", "outcome": "error"},
+        )
+        is None
+    )
     monkeypatch.undo()
 
 
 def test_committed_completion_survives_ambiguous_commit_error(
-    state: State, monkeypatch: pytest.MonkeyPatch
+    state: State, monkeypatch: pytest.MonkeyPatch, metrics: Metrics
 ) -> None:
     job_id = state.reserve()
     original = Session.commit
@@ -493,6 +594,21 @@ def test_committed_completion_survives_ambiguous_commit_error(
     assert state.status(job_id) == "completed"
     assert all(snapshot(state).values())
     assert state.generation() == 1
+    # Outcome is observed commit-return failure, NOT authoritative job status.
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "background", "outcome": "error"},
+        )
+        == 1
+    )
+    assert (
+        metrics.registry.get_sample_value(
+            "repomind_indexing_executions_total",
+            {"mode": "background", "outcome": "success"},
+        )
+        is None
+    )
     monkeypatch.undo()
 
 

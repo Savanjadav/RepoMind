@@ -30,6 +30,7 @@ from app.javascript_typescript_code_parser import (
     JavaScriptCodeParser,
     TypeScriptCodeParser,
 )
+from app.metrics import file_hashed, indexing_execution, units_parsed
 from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
 from app.models.file import File
@@ -99,14 +100,15 @@ def index_repository(
     job.status = "running"
     session.flush()
 
-    return _execute_indexing_job(
-        session,
-        repository=repository,
-        job=job,
-        source=source,
-        embedding_provider=embedding_provider,
-        workspace_root=workspace_root,
-    )
+    with indexing_execution("direct"):
+        return _execute_indexing_job(
+            session,
+            repository=repository,
+            job=job,
+            source=source,
+            embedding_provider=embedding_provider,
+            workspace_root=workspace_root,
+        )
 
 
 def execute_reserved_indexing_job(
@@ -211,6 +213,7 @@ def _index_cloned_repository(
         hashes[candidate.relative_path] = hashlib.sha256(
             _read_candidate_bytes(candidate)
         ).hexdigest()
+        file_hashed()
     files_by_path = {
         file.path: file
         for file in session.scalars(
@@ -296,6 +299,7 @@ def _index_cloned_repository(
         content = _decode_utf8(content_bytes)
         if path in refresh:
             parsed_units = parser.parse(content=content, relative_path=path)
+            units_parsed(len(parsed_units))
             stored_units = persist_code_units(session, file.id, parsed_units)
             embedding_batch.extend(stored_units)
         else:

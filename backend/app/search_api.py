@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.code_parser import CodeUnitKind
 from app.database import get_db_session
 from app.embedding_provider import EmbeddingProvider
+from app.metrics import retrieval
 from app.models.code_unit import EMBEDDING_DIMENSION
 from app.models.repository import Repository
 from app.redis_cache import RedisCache, get_redis_cache, search_key
@@ -120,27 +121,28 @@ def search(
             generation = current
             key = search_key(repository_id, generation, q, limit)
 
-    embedding_provider = provider_factory()
-    if embedding_provider.dimension != EMBEDDING_DIMENSION:
-        raise RuntimeError("Embedding provider dimension does not match storage")
+    with retrieval("search_semantic"):
+        embedding_provider = provider_factory()
+        if embedding_provider.dimension != EMBEDDING_DIMENSION:
+            raise RuntimeError("Embedding provider dimension does not match storage")
 
-    vectors = embedding_provider.embed([q])
-    if len(vectors) != 1:
-        raise RuntimeError("Embedding provider returned an unexpected vector count")
+        vectors = embedding_provider.embed([q])
+        if len(vectors) != 1:
+            raise RuntimeError("Embedding provider returned an unexpected vector count")
 
-    try:
-        results = search_code_units_semantically(
-            session,
-            repository_id=repository_id,
-            query_vector=vectors[0],
-            limit=limit,
-        )
-    except ValueError as error:
-        if error.args == ("Repository does not exist",):
-            raise HTTPException(
-                status_code=404, detail="Repository not found"
-            ) from error
-        raise
+        try:
+            results = search_code_units_semantically(
+                session,
+                repository_id=repository_id,
+                query_vector=vectors[0],
+                limit=limit,
+            )
+        except ValueError as error:
+            if error.args == ("Repository does not exist",):
+                raise HTTPException(
+                    status_code=404, detail="Repository not found"
+                ) from error
+            raise
 
     response = SemanticSearchResponse(
         items=[

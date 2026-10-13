@@ -1,6 +1,7 @@
 """Provider-independent grounding prompts; not an answer or citation validator."""
 
 from app.llm_provider import LLMMessage, LLMProvider, LLMResponse, LLMRole
+from app.metrics import llm_request
 from app.rag_context import FormattedContext
 
 _INSUFFICIENT_EVIDENCE = (
@@ -74,7 +75,8 @@ def generate_grounded_answer(
     messages = build_grounded_messages(question=question, context=context)
     if context.text == "":
         return LLMResponse(content=_INSUFFICIENT_EVIDENCE)
-    return provider.chat(messages)
+    with llm_request():
+        return provider.chat(messages)
 
 
 def _validate_question(question: str) -> None:

@@ -292,6 +292,65 @@ the stored source content.
 Semantic nearest-neighbor search is available through `/search` and participates
 in `/ask` hybrid retrieval before reranking and dependency expansion.
 
+### Application Metrics
+
+`GET /metrics` exposes process-local Prometheus text using the official Python
+client. Scraping requires no database, Redis, or model initialization:
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `repomind_http_requests_total` | `method`, `route`, `status_class` | HTTP responses/interrupted requests |
+| `repomind_http_request_duration_seconds` | same | Time through final response-body send, not background work |
+| `repomind_indexing_executions_total` | `mode`, `outcome` | Observed direct/background executions, not persisted job counts |
+| `repomind_indexing_duration_seconds` | same | Execution duration as defined below |
+| `repomind_indexing_files_hashed_total` | none | Successfully hashed candidate files, including unchanged files |
+| `repomind_indexing_code_units_parsed_total` | none | Newly parsed CodeUnits; reused units are excluded |
+| `repomind_retrieval_duration_seconds` | `pipeline`, `outcome` | Embedding-provider acquisition/query embedding through retrieval |
+| `repomind_llm_request_duration_seconds` | `outcome` | Actual `provider.chat()` duration, not prompt construction |
+
+All histogram durations are in seconds, with the client's cumulative bucket,
+count and sum series. HTTP/retrieval buckets are
+`0.005, 0.025, 0.1, 0.5, 1, 5, 15, 60, 180`; indexing buckets are
+`0.1, 1, 5, 15, 60, 180, 600, 1800`; LLM buckets are
+`0.1, 0.5, 1, 5, 15, 30, 60, 120, 180`. Each also has `+Inf`.
+
+Labels are bounded: standard HTTP methods (otherwise `OTHER`), matched FastAPI
+route templates (otherwise `unmatched`), and status classes
+`2xx/3xx/4xx/5xx/cancelled/incomplete`. A request is observed once; interruptions
+after a completed response do not replace that response's classification.
+Scrapes are excluded. Raw URLs, repository IDs, queries, source, prompts, and
+exception messages are never labels.
+
+Indexing modes are `direct/background`, with `success/error/cancelled` outcomes.
+Direct execution begins after validation/job setup and ends at service return:
+it **does not** claim that the caller committed. Background execution begins
+after a successful exact-job claim commit, includes provider acquisition and
+workspace cleanup, and succeeds only after the completion commit returns.
+Reservation, queue wait and duplicate/unclaimed runner invocations are excluded.
+An execution error is an observed error, not proof of a persisted failed status:
+for example, a lost commit acknowledgement can coexist with committed success.
+Failure-status recovery is outside the execution timer. File/unit counters
+measure **work performed**, including work later rolled back, not inventory.
+
+Retrieval pipelines are `search_semantic/ask_dependency`, with
+`success/error/cancelled`. `/search` cache hits do not acquire a provider or
+observe retrieval. `/ask` retrieval excludes context formatting and generation.
+LLM outcomes are `success/timeout/unavailable/response_error/error/cancelled`;
+empty-context deterministic answers do not call or observe the LLM. Telemetry
+observation failures are isolated without replacing application exceptions.
+
+Metrics are cumulative, in memory, and reset on process restart. The application
+uses one isolated registry shared through request/background-task context;
+independent test applications get independent registries. Collection currently
+assumes a **single backend process**: multiple workers have separate counters,
+not an aggregated view. No durable metrics store, server, dashboard, alerts or
+multiprocess collector is included. Restrict production scrape access to trusted
+networks; this endpoint has no added authentication and exposes operational data.
+
 ## The Problem
 
 Understanding an unfamiliar codebase takes time. Developers often need to trace
@@ -488,11 +547,12 @@ generated text.
 - Optional Redis search caching and advisory indexing-reservation leases
 - Next.js App Router, React and TypeScript connectivity interface
 - pytest, Ruff, and Mypy
+- Prometheus-compatible application metrics endpoint
 
 ### Planned for v0.1.0
 
 - GitHub Actions
-- Prometheus and Grafana
+- Prometheus server and Grafana dashboards
 
 Technologies are introduced only when their implementation stage requires
 them. RepoMind favors small, testable components over premature infrastructure.
