@@ -1,0 +1,563 @@
+{
+  "id": null,
+  "uid": "repomind-overview",
+  "title": "RepoMind — Operational Overview",
+  "tags": [
+    "repomind"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Backend scrape health",
+      "type": "stat",
+      "description": "Prometheus scrape reachability only; not database/model health. Missing means no scrape data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"repomind\"}",
+          "legendFormat": "{{instance}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No scrape data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "graphMode": "none",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 2,
+      "title": "HTTP requests per second",
+      "type": "timeseries",
+      "description": "Five-minute rate, reset-aware; needs at least two samples. Scrapes excluded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(repomind_http_requests_total{job=\"repomind\"}[5m]))",
+          "legendFormat": "Requests/s",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "HTTP server-error percentage",
+      "type": "timeseries",
+      "description": "Only 5xx are server failures. No traffic or missing data yields no value; observed traffic without 5xx yields zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * ((sum(rate(repomind_http_requests_total{job=\"repomind\",status_class=\"5xx\"}[5m])) or 0 * sum(rate(repomind_http_requests_total{job=\"repomind\"}[5m]))) / sum(rate(repomind_http_requests_total{job=\"repomind\"}[5m]))) and (sum(rate(repomind_http_requests_total{job=\"repomind\"}[5m])) > 0)",
+          "legendFormat": "5xx %",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Client errors / interrupted requests",
+      "type": "timeseries",
+      "description": "4xx, cancellations and incomplete responses are separate from server failures. Missing series are not synthesized.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status_class) (rate(repomind_http_requests_total{job=\"repomind\",status_class=~\"4xx|cancelled|incomplete\"}[5m]))",
+          "legendFormat": "{{status_class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Estimated HTTP p95",
+      "type": "timeseries",
+      "description": "Bucket-based estimate through final body send; background work excluded. Sparse traffic is imprecise; no observations is not zero latency.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(repomind_http_request_duration_seconds_bucket{job=\"repomind\"}[5m])))",
+          "legendFormat": "p95",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Indexing execution outcomes",
+      "type": "stat",
+      "description": "Estimated executions over selected range, not persisted jobs. Increase may be fractional. Reservations/duplicate unclaimed runners excluded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (mode, outcome) (increase(repomind_indexing_executions_total{job=\"repomind\"}[$__range]))",
+          "legendFormat": "{{mode}} / {{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No observations in window"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "graphMode": "none",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Estimated indexing p95",
+      "type": "timeseries",
+      "description": "Observed execution durations across outcomes. Queue wait/direct caller commit excluded; background cleanup/completion commit included. Not user waiting time. Sparse samples yield uncertain estimates.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, mode) (rate(repomind_indexing_duration_seconds_bucket{job=\"repomind\"}[5m])))",
+          "legendFormat": "{{mode}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Files hashed per second",
+      "type": "timeseries",
+      "description": "Work performed including unchanged files and work later rolled back; NOT current file inventory.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(repomind_indexing_files_hashed_total{job=\"repomind\"}[5m]))",
+          "legendFormat": "Files/s",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "CodeUnits parsed per second",
+      "type": "timeseries",
+      "description": "Newly parsed units, including rolled-back work; reused units excluded. NOT persisted inventory.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(repomind_indexing_code_units_parsed_total{job=\"repomind\"}[5m]))",
+          "legendFormat": "Units/s",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Estimated retrieval p95",
+      "type": "timeseries",
+      "description": "search_semantic / ask_dependency pipeline duration including cold embedding-provider acquisition/query embedding. Cache hits excluded; not vector DB time alone. No observations is not zero latency.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, pipeline) (rate(repomind_retrieval_duration_seconds_bucket{job=\"repomind\"}[5m])))",
+          "legendFormat": "{{pipeline}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Estimated LLM-call p95",
+      "type": "timeseries",
+      "description": "Actual provider.chat duration by outcome. Empty-context bypass excluded. No call means no observation, not zero latency. Not token throughput; sparse p95 is approximate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "repomind-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(repomind_llm_request_duration_seconds_bucket{job=\"repomind\"}[5m])))",
+          "legendFormat": "{{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "repomind-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No observations in window",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    }
+  ]
+}

@@ -347,9 +347,90 @@ Metrics are cumulative, in memory, and reset on process restart. The application
 uses one isolated registry shared through request/background-task context;
 independent test applications get independent registries. Collection currently
 assumes a **single backend process**: multiple workers have separate counters,
-not an aggregated view. No durable metrics store, server, dashboard, alerts or
-multiprocess collector is included. Restrict production scrape access to trusted
+not an aggregated view. An optional local Prometheus/Grafana stack is described
+below; no alerts or multiprocess collector are included. Restrict scrape access to trusted
 networks; this endpoint has no added authentication and exposes operational data.
+
+### Local Observability Dashboard
+
+The optional `observability` Compose profile provisions Prometheus and the
+**RepoMind — Operational Overview** Grafana dashboard. It uses existing metrics;
+it does not add application instrumentation, exporters, alerts or real-model calls.
+
+Prerequisites: Docker Desktop on macOS with native ARM64 image support, Docker
+Compose, and the installed backend environment. The host-run backend remains
+loopback-only. From `backend`, with your usual environment loaded, run one process:
+
+```bash
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+From the repository root, supply a private, nonempty Grafana password. For zsh,
+read it without echoing or putting its value in command history:
+
+```zsh
+read -rs 'GRAFANA_ADMIN_PASSWORD?Grafana admin password: '
+echo
+export GRAFANA_ADMIN_PASSWORD
+docker compose --profile observability up -d prometheus grafana
+unset GRAFANA_ADMIN_PASSWORD
+```
+
+Grafana refuses startup with an empty password; ordinary database/Redis Compose
+commands do not require it. Log in as `admin` using your chosen password. Anonymous
+access, signup and public dashboards are disabled. Do not share rendered Compose
+configuration or container inspection output containing the password. The password
+environment variable bootstraps a new Grafana volume; changing it does not reset an
+existing user's password. Supply it again when recreating the Grafana container.
+
+- Backend metrics: `http://127.0.0.1:8000/metrics`
+- Prometheus: `http://127.0.0.1:9090`
+- Grafana: `http://127.0.0.1:3001` (Next.js retains port 3000)
+
+Prometheus scrapes `host.docker.internal:8000/metrics` every 15 seconds, with a
+5-second timeout. Docker Desktop supplies this host gateway; container localhost
+is **not** the host Mac. Grafana's provisioned datasource `repomind-prometheus`
+uses Docker service DNS, `http://prometheus:9090`. Configuration and dashboard JSON
+are mounted read-only. The provisioned dashboard in folder **RepoMind** refreshes
+every 30 seconds, defaults to the last hour, and cannot save UI edits over the
+version-controlled JSON.
+
+This topology is for Docker Desktop. Native Linux, VPNs and other network setups
+may differ. Verify container-to-host HTTP reachability before relying on scraping.
+Do not solve a failed scrape by exposing the backend on `0.0.0.0`. All published
+dashboard ports bind only to `127.0.0.1`; access still trusts local users and Docker
+workloads. This is not a production authentication or network-isolation design.
+
+Generate harmless real HTTP observations without using models or writing data:
+
+```bash
+for i in 1 2 3 4 5; do curl -fsS http://127.0.0.1:8000/health; sleep 15; done
+curl -s -o /dev/null http://127.0.0.1:8000/nonexistent-demo-route
+```
+
+The eleven panels show scrape health, HTTP rate, 5xx percentage, client errors and
+interruptions, HTTP p95, indexing outcomes/p95, hashing/parsing rates, retrieval
+p95 and LLM-call p95. Rate panels use five-minute windows and need at least two
+samples. Missing data stays missing: zero traffic has no server-error percentage,
+whereas observed traffic without server errors has 0%. No latency observations
+must not be interpreted as zero latency. Quantiles are bucket estimates and are
+unreliable with sparse traffic. Indexing increases are extrapolated and can be
+fractional. Scrape UP does not prove the database or Ollama is healthy; historical
+samples can remain visible after a backend stops. Indexing/retrieval/LLM panels
+need corresponding real operations; fixture-based verification is not model
+performance benchmarking. Work counters are not database inventory.
+
+Named volumes `prometheus_data` and `grafana_data` retain samples and Grafana state.
+Prometheus retention is seven days with a 1GB time-series size cap (not a strict
+cap on all filesystem overhead). Backend counters reset on process restart;
+Prometheus rate calculations handle observed counter resets. Local volumes are
+not backups. Stop only observability services without touching database data:
+
+```bash
+docker compose --profile observability stop grafana prometheus
+```
+
+Do not use a Compose-wide `down -v` for observability cleanup.
 
 ## The Problem
 
@@ -548,11 +629,11 @@ generated text.
 - Next.js App Router, React and TypeScript connectivity interface
 - pytest, Ruff, and Mypy
 - Prometheus-compatible application metrics endpoint
+- Optional local Prometheus/Grafana operational dashboard
 
 ### Planned for v0.1.0
 
 - GitHub Actions
-- Prometheus server and Grafana dashboards
 
 Technologies are introduced only when their implementation stage requires
 them. RepoMind favors small, testable components over premature infrastructure.
