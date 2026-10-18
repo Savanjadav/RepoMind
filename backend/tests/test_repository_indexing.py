@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -9,11 +10,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import app.repository_indexing as indexing_module
+from app.code_parser import ParsedCodeUnit
 from app.code_relationships import FileCallAnalysis
 from app.code_unit_persistence import persist_code_units
 from app.database import create_database_engine
 from app.embedding_provider import EmbeddingProvider
+from app.hybrid_search import HybridSearchResult, search_code_units_hybrid
 from app.import_relationships import ImportReference
+from app.lexical_search import LexicalSearchResult, search_code_units_lexically
 from app.metrics import Metrics, use_metrics
 from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import EMBEDDING_DIMENSION, CodeUnit
@@ -24,9 +28,347 @@ from app.models.repository import Repository
 from app.repository_clone import ClonedRepository, RepositoryCloneError
 from app.repository_files import RepositoryFileCandidate
 from app.repository_indexing import RepositoryIndexingError, index_repository
+from app.reranked_search import RerankedSearchResult, search_code_units_reranked
+from app.semantic_search import SemanticSearchResult, search_code_units_semantically
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 GITHUB_SOURCE = "https://github.com/example/project.git"
+
+
+class EqualScoreReranker:
+    model_name = "test-equal-score"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def score(self, query: str, documents: Sequence[str]) -> list[float]:
+        self.calls.append((query, tuple(documents)))
+        return [1.0] * len(documents)
+
+
+def _edge_case_searches(
+    session: Session,
+    repository: Repository,
+    query: str,
+    reranker: EqualScoreReranker,
+) -> dict[
+    str,
+    Sequence[
+        SemanticSearchResult
+        | LexicalSearchResult
+        | HybridSearchResult
+        | RerankedSearchResult
+    ],
+]:
+    vector = [1.0] + [0.0] * (EMBEDDING_DIMENSION - 1)
+    return {
+        "semantic": search_code_units_semantically(
+            session, repository_id=repository.id, query_vector=vector, limit=100
+        ),
+        "lexical": search_code_units_lexically(
+            session, repository_id=repository.id, query=query, limit=100
+        ),
+        "hybrid": search_code_units_hybrid(
+            session,
+            repository_id=repository.id,
+            query=query,
+            query_vector=vector,
+            limit=100,
+        ),
+        "reranked": search_code_units_reranked(
+            session,
+            repository_id=repository.id,
+            query=query,
+            query_vector=vector,
+            reranker=reranker,
+            limit=100,
+        ),
+    }
+
+
+def _edge_case_units(session: Session, repository: Repository) -> list[CodeUnit]:
+    return list(
+        session.scalars(
+            select(CodeUnit)
+            .join(File, CodeUnit.file_id == File.id)
+            .where(File.repository_id == repository.id)
+            .order_by(File.path, CodeUnit.start_line, CodeUnit.id)
+        )
+    )
+
+
+def test_duplicate_symbols_survive_indexing_and_all_retrieval_stages(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = b"def repeated():\n    return 1\n\ndef repeated():\n    return 2\n"
+    _install_offline_clone(
+        monkeypatch,
+        {
+            "a.py": source,
+            "b.py": b"def repeated():\n    return 3\n",
+        },
+    )
+    repository = _repository(database_session)
+    other = _repository(database_session)
+    provider = FakeEmbeddingProvider()
+    _index(database_session, other, FakeEmbeddingProvider(), tmp_path / "other")
+    _index(database_session, repository, provider, tmp_path / "target")
+    units = _edge_case_units(database_session, repository)
+    expected = [
+        ("a.py", 1, 2, "repeated", "def repeated():\n    return 1"),
+        ("a.py", 4, 5, "repeated", "def repeated():\n    return 2"),
+        ("b.py", 1, 2, "repeated", "def repeated():\n    return 3"),
+    ]
+    assert [
+        (u.file.path, u.start_line, u.end_line, u.symbol_name, u.content) for u in units
+    ] == expected
+    expected_by_id = {
+        u.id: metadata for u, metadata in zip(units, expected, strict=True)
+    }
+    assert len(expected_by_id) == 3
+    other_ids = {u.id for u in _edge_case_units(database_session, other)}
+    assert len(other_ids) == 3 and other_ids.isdisjoint(expected_by_id)
+    reranker = EqualScoreReranker()
+    results = _edge_case_searches(database_session, repository, "repeated", reranker)
+    again = _edge_case_searches(database_session, repository, "repeated", reranker)
+    for mode, rows in results.items():
+        assert len(rows) == 3 and {r.code_unit_id for r in rows} == set(expected_by_id)
+        assert [r.code_unit_id for r in rows] == [r.code_unit_id for r in again[mode]]
+        for r in rows:
+            assert (r.path, r.start_line, r.end_line, r.symbol_name, r.content) == (
+                expected_by_id[r.code_unit_id]
+            )
+            assert r.file_id == next(u.file_id for u in units if u.id == r.code_unit_id)
+    hybrid = results["hybrid"]
+    assert all(
+        isinstance(r, HybridSearchResult)
+        and r.semantic_rank is not None
+        and r.lexical_rank is not None
+        for r in hybrid
+    )
+    assert [r.code_unit_id for r in results["reranked"]] == [
+        r.code_unit_id for r in hybrid
+    ]
+    expected_documents = tuple(
+        f"Path: {r.path}\nSymbol: repeated\n\nContent:\n{r.content}" for r in hybrid
+    )
+    assert reranker.calls == [("repeated", expected_documents)] * 2
+    assert all(
+        isinstance(r, RerankedSearchResult)
+        and r.rerank_score == 1.0
+        and r.original_hybrid_rank == rank
+        for rank, r in enumerate(results["reranked"], 1)
+    )
+    before_batches = list(provider.batches)
+    generation = repository.index_generation
+    _index(database_session, repository, provider, tmp_path / "target")
+    assert {u.id for u in _edge_case_units(database_session, repository)} == set(
+        expected_by_id
+    )
+    assert (
+        provider.batches == before_batches and repository.index_generation == generation
+    )
+
+
+@pytest.mark.parametrize("content", [b"", b" \t\r\n\n"])
+def test_empty_supported_files_index_as_metadata_without_embeddings(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: bytes,
+) -> None:
+    files = {
+        path: content
+        for path in ["empty.py", "empty.js", "empty.ts", "notes.md", "settings.yaml"]
+    }
+    destinations = _install_offline_clone(monkeypatch, files)
+    repository = _repository(database_session)
+    provider = FakeEmbeddingProvider()
+    assert (
+        _index(database_session, repository, provider, tmp_path / "workspace").status
+        == "completed"
+    )
+    stored = list(
+        database_session.scalars(
+            select(File).where(File.repository_id == repository.id)
+        )
+    )
+    assert {f.path: f.content_hash for f in stored} == {
+        path: hashlib.sha256(raw).hexdigest() for path, raw in files.items()
+    }
+    assert (
+        _edge_case_units(database_session, repository) == [] and provider.batches == []
+    )
+    reranker = EqualScoreReranker()
+    assert all(
+        not rows
+        for rows in _edge_case_searches(
+            database_session, repository, "empty", reranker
+        ).values()
+    )
+    assert reranker.calls == []
+    assert destinations and all(not p.exists() for p in destinations)
+
+
+def test_sixty_five_definitions_keep_full_spans_and_default_embedding_batches(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definitions = [
+        f'def entry_{i}():\n    return "{"界" * 2_100 if i == 0 else i}"'
+        for i in range(65)
+    ]
+    _install_offline_clone(
+        monkeypatch, {"many.py": ("\n\n".join(definitions) + "\n").encode()}
+    )
+    repository = _repository(database_session)
+    provider = FakeEmbeddingProvider()
+    assert (
+        _index(database_session, repository, provider, tmp_path / "workspace").status
+        == "completed"
+    )
+    units = _edge_case_units(database_session, repository)
+    assert len(units) == 65 and len({u.id for u in units}) == 65
+    assert [u.content for u in units] == definitions
+    assert [(u.symbol_name, u.start_line, u.end_line) for u in units] == [
+        (f"entry_{i}", 3 * i + 1, 3 * i + 2) for i in range(65)
+    ]
+    assert [len(batch) for batch in provider.batches] == [64, 1]
+    assert [text for batch in provider.batches for text in batch] == definitions
+    assert all(u.embedding is not None for u in units)
+    for rows in _edge_case_searches(
+        database_session, repository, "entry_", EqualScoreReranker()
+    ).values():
+        assert len(rows) == 65 and {r.code_unit_id for r in rows} == {
+            u.id for u in units
+        }
+        assert {r.code_unit_id: r.content for r in rows} == {
+            u.id: u.content for u in units
+        }
+
+
+@pytest.mark.parametrize("path", ["notes.md", "settings.yaml"])
+def test_long_text_chunks_survive_indexing_losslessly(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    # One physical Unicode line: both chunks intentionally have the same range.
+    content = "界" * 2_001
+    _install_offline_clone(monkeypatch, {path: content.encode()})
+    repository = _repository(database_session)
+    provider = FakeEmbeddingProvider()
+    _index(database_session, repository, provider, tmp_path / "workspace")
+    units = _edge_case_units(database_session, repository)
+    assert len(units) == 2 and len({u.id for u in units}) == 2
+    assert sorted(u.content for u in units) == ["界", "界" * 2_000]
+    assert all((u.start_line, u.end_line) == (1, 1) for u in units)
+    assert provider.batches == [("界" * 2_000, "界")]
+    assert "".join(provider.batches[0]) == content
+    assert all(u.embedding is not None for u in units)
+    for rows in _edge_case_searches(
+        database_session, repository, "界", EqualScoreReranker()
+    ).values():
+        assert len(rows) == 2 and {r.code_unit_id for r in rows} == {
+            u.id for u in units
+        }
+        assert sorted(r.content for r in rows) == ["界", "界" * 2_000]
+
+
+def test_discovery_byte_limit_controls_indexing_without_truncation(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 1_048_576
+    definition = b"def boundary():\n    return 1\n"
+    admitted = (
+        b"#"
+        + ("é" * ((limit - len(definition) - 3) // 2)).encode()
+        + b"\n"
+        + definition
+    )
+    excluded = admitted + b" " * (limit + 1 - len(admitted))
+    assert len(admitted) < limit < len(excluded)
+    assert len(admitted.decode()) < len(admitted)
+    _install_offline_clone(monkeypatch, {"below.py": admitted, "above.py": excluded})
+    parsed: list[str] = []
+    original = indexing_module.PythonCodeParser.parse
+
+    def record_parse(
+        self: indexing_module.PythonCodeParser, *, content: str, relative_path: str
+    ) -> list[ParsedCodeUnit]:
+        parsed.append(relative_path)
+        return original(self, content=content, relative_path=relative_path)
+
+    monkeypatch.setattr(indexing_module.PythonCodeParser, "parse", record_parse)
+    repository = _repository(database_session)
+    provider = FakeEmbeddingProvider()
+    assert (
+        _index(database_session, repository, provider, tmp_path / "workspace").status
+        == "completed"
+    )
+    stored = list(
+        database_session.scalars(
+            select(File).where(File.repository_id == repository.id)
+        )
+    )
+    assert [(f.path, f.content_hash) for f in stored] == [
+        ("below.py", hashlib.sha256(admitted).hexdigest())
+    ]
+    assert parsed == ["below.py"]
+    units = _edge_case_units(database_session, repository)
+    assert len(units) == 1
+    assert (units[0].content, units[0].start_line, units[0].end_line) == (
+        definition.decode().rstrip("\n"),
+        2,
+        3,
+    )
+    assert provider.batches == [(definition.decode().rstrip("\n"),)]
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_unsupported_languages_remain_metadata_only(
+    database_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mixed: bool,
+) -> None:
+    unsupported = {
+        path: b"def searchable():\n    return 1\n"
+        for path in ["module.rs", "module.go", "module.tsx", "UNKNOWN_SOURCE"]
+    }
+    files = dict(unsupported)
+    if mixed:
+        files["supported.py"] = b"def searchable():\n    return 2\n"
+    _install_offline_clone(monkeypatch, files)
+    repository = _repository(database_session)
+    provider = FakeEmbeddingProvider()
+    assert (
+        _index(database_session, repository, provider, tmp_path / "workspace").status
+        == "completed"
+    )
+    stored = list(
+        database_session.scalars(
+            select(File).where(File.repository_id == repository.id)
+        )
+    )
+    assert {f.path: f.content_hash for f in stored} == {
+        p: hashlib.sha256(raw).hexdigest() for p, raw in files.items()
+    }
+    units = _edge_case_units(database_session, repository)
+    assert len(units) == int(mixed)
+    assert provider.batches == ([("def searchable():\n    return 2",)] if mixed else [])
+    for rows in _edge_case_searches(
+        database_session, repository, "searchable", EqualScoreReranker()
+    ).values():
+        assert len(rows) == int(mixed)
+        assert {r.code_unit_id for r in rows} == {u.id for u in units}
+        assert all(r.path == "supported.py" for r in rows)
 
 
 @pytest.fixture

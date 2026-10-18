@@ -9,6 +9,59 @@ from app.code_parser import (
 from app.python_code_parser import PythonCodeParser
 
 
+def test_duplicate_names_preserve_each_source_occurrence() -> None:
+    content = (
+        "def same():\n    return 1\n\n"
+        "def same():\n    return 2\n\n"
+        "class First:\n    def same(self):\n        return 3\n\n"
+        "class Second:\n    def same(self):\n        return 4\n"
+    )
+    units = PythonCodeParser().parse(content=content, relative_path="duplicates.py")
+    assert [
+        (unit.kind, unit.symbol_name, unit.start_line, unit.end_line, unit.content)
+        for unit in units
+    ] == [
+        (CodeUnitKind.FUNCTION, "same", 1, 2, "def same():\n    return 1"),
+        (CodeUnitKind.FUNCTION, "same", 4, 5, "def same():\n    return 2"),
+        (
+            CodeUnitKind.CLASS,
+            "First",
+            7,
+            9,
+            "class First:\n    def same(self):\n        return 3",
+        ),
+        (CodeUnitKind.FUNCTION, "same", 8, 9, "def same(self):\n        return 3"),
+        (
+            CodeUnitKind.CLASS,
+            "Second",
+            11,
+            13,
+            "class Second:\n    def same(self):\n        return 4",
+        ),
+        (CodeUnitKind.FUNCTION, "same", 12, 13, "def same(self):\n        return 4"),
+    ]
+    assert all(unit.relative_path == "duplicates.py" for unit in units)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_long_definition_after_prefix_is_exact_and_deterministic(newline: str) -> None:
+    prefix = ("# Unicode prefix café" + newline) * 200
+    definition = "def long_value():" + newline + '    return "' + "界" * 2_100 + '"'
+    parser = PythonCodeParser()
+    units = parser.parse(content=prefix + definition, relative_path="long.py")
+    assert len(units) == 1
+    unit = units[0]
+    assert (unit.kind, unit.symbol_name, unit.start_line, unit.end_line) == (
+        CodeUnitKind.FUNCTION,
+        "long_value",
+        201,
+        202,
+    )
+    assert unit.content == definition and len(unit.content) > 2_000
+    assert unit.language == "python" and unit.relative_path == "long.py"
+    assert units == parser.parse(content=prefix + definition, relative_path="long.py")
+
+
 @pytest.fixture
 def parser() -> PythonCodeParser:
     return PythonCodeParser()

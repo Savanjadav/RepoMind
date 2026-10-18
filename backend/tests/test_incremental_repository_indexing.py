@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app import repository_indexing as indexing
 from app.database import create_database_engine
+from app.lexical_search import search_code_units_lexically
 from app.models.code_relationship import CodeRelationship
 from app.models.code_unit import CodeUnit
 from app.models.file import File
@@ -33,6 +34,135 @@ class FakeEmbeddingProvider:
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         self.batches.append(tuple(texts))
         return [[float(len(t)), 1.0] + [0.0] * 382 for t in texts]
+
+
+def test_populated_empty_populated_preserves_file_but_refreshes_units(
+    fixture: "IndexingFixture",
+) -> None:
+    original = fixture.files["service.py"]
+    assert fixture.run().status == "completed"
+    session, repository = fixture.session, fixture.repository
+    file = session.scalar(
+        select(File).where(
+            File.repository_id == repository.id, File.path == "service.py"
+        )
+    )
+    assert file is not None
+    file_id = file.id
+    initial = _units(fixture)
+    old_ids = {row[0] for row in initial["service.py"]}
+    assert len(old_ids) == 1 and initial["service.py"][0][2]
+    assert file.content_hash == hashlib.sha256(original).hexdigest()
+    assert repository.index_generation == 1
+    graph = _snapshot(session, repository.id)
+    assert len(graph["relationships"]) == len(graph["code_relationships"]) == 1
+    assert old_ids <= {
+        r.code_unit_id
+        for r in search_code_units_lexically(
+            session, repository_id=repository.id, query="helper", limit=100
+        )
+    }
+
+    fixture.provider.batches.clear()
+    fixture.files["service.py"] = b""
+    assert fixture.run().status == "completed"
+    session.refresh(file)
+    assert file.id == file_id and file.content_hash == hashlib.sha256(b"").hexdigest()
+    assert repository.index_generation == 2
+    assert (
+        list(session.scalars(select(CodeUnit.id).where(CodeUnit.id.in_(old_ids)))) == []
+    )
+    assert "service.py" not in _units(fixture)
+    assert _units(fixture)["api.py"] == initial["api.py"]
+    assert fixture.provider.batches == []
+    rows = search_code_units_lexically(
+        session, repository_id=repository.id, query="helper", limit=100
+    )
+    assert rows and all(
+        r.path != "service.py" and r.code_unit_id not in old_ids for r in rows
+    )
+    # The file still exists: imports survive, calls to its removed function do not.
+    imports = list(
+        session.scalars(
+            select(Relationship).where(Relationship.repository_id == repository.id)
+        )
+    )
+    assert len(imports) == 1 and imports[0].target_file_id == file_id
+    assert _snapshot(session, repository.id)["code_relationships"] == []
+    empty_snapshot = _snapshot(session, repository.id)
+    assert fixture.run().status == "completed"
+    assert _snapshot(session, repository.id) == empty_snapshot
+    assert repository.index_generation == 2 and fixture.provider.batches == []
+
+    fixture.files["service.py"] = original
+    assert fixture.run().status == "completed"
+    session.refresh(file)
+    assert (
+        file.id == file_id and file.content_hash == hashlib.sha256(original).hexdigest()
+    )
+    assert repository.index_generation == 3
+    restored = _units(fixture)
+    new_ids = {row[0] for row in restored["service.py"]}
+    assert len(new_ids) == 1 and new_ids.isdisjoint(old_ids)
+    assert restored["service.py"][0][1:] == initial["service.py"][0][1:]
+    assert restored["api.py"] == initial["api.py"]
+    assert fixture.provider.batches == [("def helper():\n    return 1",)]
+    rows = search_code_units_lexically(
+        session, repository_id=repository.id, query="helper", limit=100
+    )
+    assert new_ids <= {r.code_unit_id for r in rows}
+    assert old_ids.isdisjoint(r.code_unit_id for r in rows)
+    graph = _snapshot(session, repository.id)
+    assert len(graph["relationships"]) == len(graph["code_relationships"]) == 1
+    call = session.scalar(
+        select(CodeRelationship).where(CodeRelationship.repository_id == repository.id)
+    )
+    assert call is not None and call.target_code_unit_id in new_ids
+    assert all(not path.exists() for path in fixture.clones)
+
+
+@pytest.mark.parametrize(
+    "path", ["module.rs", "module.go", "module.tsx", "UNKNOWN_SOURCE"]
+)
+def test_unsupported_content_refresh_updates_only_metadata(
+    fixture: "IndexingFixture",
+    path: str,
+) -> None:
+    fixture.files = {path: b"def fake(): pass\n", "supported.py": b"def real(): pass\n"}
+    assert fixture.run().status == "completed"
+    file = fixture.session.scalar(
+        select(File).where(
+            File.repository_id == fixture.repository.id, File.path == path
+        )
+    )
+    assert file is not None
+    file_id = file.id
+    assert file.content_hash == hashlib.sha256(fixture.files[path]).hexdigest()
+    before = _units(fixture)
+    assert set(before) == {"supported.py"} and len(before["supported.py"]) == 1
+    fixture.provider.batches.clear()
+    # Unsupported content is hashed, not UTF-8 decoded or guessed to be Python.
+    fixture.files[path] = b"def changed(): pass\n\xff"
+    assert fixture.run().status == "completed"
+    fixture.session.refresh(file)
+    assert file.id == file_id
+    assert file.content_hash == hashlib.sha256(fixture.files[path]).hexdigest()
+    assert fixture.repository.index_generation == 2
+    assert _units(fixture) == before and fixture.provider.batches == []
+    assert (
+        search_code_units_lexically(
+            fixture.session,
+            repository_id=fixture.repository.id,
+            query="changed",
+            limit=100,
+        )
+        == []
+    )
+    snapshot = _snapshot(fixture.session, fixture.repository.id)
+    assert fixture.run().status == "completed"
+    assert fixture.repository.index_generation == 2
+    assert _snapshot(fixture.session, fixture.repository.id) == snapshot
+    assert fixture.provider.batches == []
 
 
 @dataclass

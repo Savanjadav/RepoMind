@@ -11,6 +11,66 @@ from app.javascript_typescript_code_parser import (
 ParserFactory = Callable[[], CodeParser]
 
 
+@pytest.mark.parametrize(
+    ("factory", "path", "language"),
+    [
+        (JavaScriptCodeParser, "duplicates.js", "javascript"),
+        (TypeScriptCodeParser, "duplicates.ts", "typescript"),
+    ],
+)
+def test_same_method_names_in_distinct_classes_are_not_collapsed(
+    factory: ParserFactory, path: str, language: str
+) -> None:
+    first = "class First {\n  same() { return 1; }\n}"
+    second = "class Second {\n  same() { return 2; }\n}"
+    units = factory().parse(content=first + "\n\n" + second, relative_path=path)
+    assert [
+        (u.kind, u.symbol_name, u.start_line, u.end_line, u.content) for u in units
+    ] == [
+        (CodeUnitKind.CLASS, "First", 1, 3, first),
+        (CodeUnitKind.FUNCTION, "same", 2, 2, "same() { return 1; }"),
+        (CodeUnitKind.CLASS, "Second", 5, 7, second),
+        (CodeUnitKind.FUNCTION, "same", 6, 6, "same() { return 2; }"),
+    ]
+    assert all(u.relative_path == path and u.language == language for u in units)
+
+
+@pytest.mark.parametrize(
+    ("factory", "path", "language"),
+    [
+        (JavaScriptCodeParser, "long.js", "javascript"),
+        (TypeScriptCodeParser, "long.ts", "typescript"),
+    ],
+)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_long_definition_after_prefix_preserves_exact_source(
+    factory: ParserFactory, path: str, language: str, newline: str
+) -> None:
+    prefix = ("// Unicode prefix café" + newline) * 200
+    definition = (
+        "function longValue() {"
+        + newline
+        + '  return "'
+        + "界" * 2_100
+        + '";'
+        + newline
+        + "}"
+    )
+    parser = factory()
+    units = parser.parse(content=prefix + definition, relative_path=path)
+    assert len(units) == 1
+    unit = units[0]
+    assert (unit.kind, unit.symbol_name, unit.start_line, unit.end_line) == (
+        CodeUnitKind.FUNCTION,
+        "longValue",
+        201,
+        203,
+    )
+    assert unit.content == definition and len(unit.content) > 2_000
+    assert unit.language == language and unit.relative_path == path
+    assert units == parser.parse(content=prefix + definition, relative_path=path)
+
+
 def _parse_with(
     parser: CodeParser,
     *,
