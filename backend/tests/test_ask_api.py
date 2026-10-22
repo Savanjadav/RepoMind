@@ -195,8 +195,8 @@ def api_context(monkeypatch: pytest.MonkeyPatch) -> Iterator[ApiContext]:
                 monkeypatch.setattr(
                     ask_api, "get_embedding_provider", lambda: embedding
                 )
-                app.dependency_overrides[search_api.get_embedding_provider] = lambda: (
-                    embedding
+                app.dependency_overrides[search_api.get_search_provider_factory] = (
+                    lambda: lambda: embedding
                 )
                 app.dependency_overrides[ask_api.get_reranking_provider] = lambda: (
                     reranker
@@ -678,6 +678,7 @@ def test_search_still_semantic_only(api_context: ApiContext) -> None:
     assert response.status_code == 200
     assert set(response.json()) == {"items", "limit"}
     assert "cosine_distance" in response.json()["items"][0]
+    assert api_context.embedding.calls == [("auth",)]
     assert api_context.reranker.calls == []
     assert api_context.llm.calls == ()
 
